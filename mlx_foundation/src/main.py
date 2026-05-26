@@ -34,6 +34,13 @@ def run_generate_only(teacher_paths: List[str], num_samples: int, output_path: s
         for sample in samples:
             f.write(json.dumps(sample) + "\n")
 
+    # Auto-export commercial dataset format
+    try:
+        from utils.export_dataset import export_premium_dataset
+        export_premium_dataset()
+    except Exception as ex:
+        print(f"Auto-export warning: {ex}")
+
     print(f"\nDone. {len(samples)} trajectories saved to: {output_path}")
     print("Transfer this file to your training machine and run:")
     print(f"  python src/main.py --mode train-only --data {output_path}")
@@ -190,6 +197,13 @@ class MLXSelfTrainingOrchestrator:
                     for sample in synthetic_samples:
                         f.write(json.dumps(sample) + "\n")
                 print(f"Saved trajectories to {cached_data_path} for future reuse.")
+
+                # Auto-export commercial dataset format
+                try:
+                    from utils.export_dataset import export_premium_dataset
+                    export_premium_dataset()
+                except Exception as ex:
+                    print(f"Auto-export warning: {ex}")
 
 
             # 2. TRAINING
