@@ -135,7 +135,7 @@ if __name__ == "__main__":
     # Define paths
     base_model = "/Users/true/.lmstudio/models/gemma-4-26b-a4b-it-oQ8"
     teacher_paths = [
-        "/Users/true/.lmstudio/models/alvarolizama/Qwen3.6-35B-A3B-oQ8-mtp",
+        "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
         "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
     ]
 

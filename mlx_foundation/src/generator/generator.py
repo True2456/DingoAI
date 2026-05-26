@@ -113,13 +113,122 @@ class MultiTeacherMLXGenerator(BaseGenerator):
 
         return samples
 
+class DynamicTaskGenerator:
+    """
+    [DARK HORSE] Self-Instruct Curriculum Creator.
+    Loads a teacher model to brainstorm diverse, sandboxed Python programming tasks dynamically.
+    """
+    def __init__(self, model_path: str):
+        self.model_path = model_path
+
+    def generate_tasks(self, num_tasks: int) -> List[str]:
+        import mlx_lm
+        import json
+        
+        print(f"Bootstrapping {num_tasks} dynamic programming tasks using teacher {self.model_path}...")
+        try:
+            model, tokenizer = mlx_lm.load(self.model_path)
+            
+            system_msg = (
+                "You are an expert curriculum designer. Brainstorm a list of unique and diverse Python programming tasks "
+                "that can be executed and verified in a simple local terminal sandbox.\n"
+                "Each task must be a single sentence, concise, and require writing a short Python script that "
+                "performs some calculations, data processing, string parsing, or filesystem checking, and prints the result.\n"
+                "Do NOT include any markdown code blocks or conversational text. Return ONLY a JSON list of strings.\n\n"
+                "Example output:\n"
+                "[\n"
+                "  \"Write a Python script that sorts a list of tuples by their second element and prints it.\",\n"
+                "  \"Create a Python script that finds all prime numbers up to 50 and prints them.\"\n"
+                "]"
+            )
+            
+            user_msg = f"Generate exactly {num_tasks} unique and diverse Python programming tasks as a JSON list of strings."
+            
+            if hasattr(tokenizer, "apply_chat_template"):
+                messages = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ]
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            else:
+                prompt = f"{system_msg}\n\n{user_msg}"
+                
+            response = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=1024, verbose=False)
+            clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
+            
+            # Robustly extract JSON array
+            def extract_first_json_array(text: str) -> Optional[list]:
+                import json
+                brace_depth = 0
+                in_string = False
+                escape = False
+                start_idx = -1
+                
+                for i, char in enumerate(text):
+                    if escape:
+                        escape = False
+                        continue
+                    if char == '\\':
+                        if in_string:
+                            escape = True
+                        continue
+                    if char == '"':
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if char == '[':
+                            if brace_depth == 0:
+                                start_idx = i
+                            brace_depth += 1
+                        elif char == ']':
+                            brace_depth -= 1
+                            if brace_depth == 0 and start_idx != -1:
+                                candidate = text[start_idx:i+1]
+                                try:
+                                    res = json.loads(candidate)
+                                    if isinstance(res, list):
+                                        return res
+                                except json.JSONDecodeError:
+                                    pass
+                return None
+
+            tasks = extract_first_json_array(clean_resp)
+            
+            # Explicit cleanup
+            del model
+            del tokenizer
+            import gc
+            gc.collect()
+            
+            if tasks and len(tasks) >= num_tasks:
+                return tasks[:num_tasks]
+            elif tasks:
+                return tasks
+        except Exception as e:
+            print(f"Error bootstrapping dynamic tasks: {e}")
+            
+        # Robust fallback
+        print("Using robust fallback task list.")
+        return [
+            "Write a Python script that calculates the 10th Fibonacci number and print it.",
+            "Create a Python script that formats a list of numbers into a comma-separated string.",
+            "Write a Python script that asserts that the string 'mlx' is uppercase and runs successfully.",
+            "Write a Python script that counts the number of vowels in 'antigravity' and prints it.",
+            "Create a Python script that filters odd numbers from [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and prints the result.",
+            "Write a Python script that reverses the words in 'the quick brown fox jumps over the lazy dog' and prints it.",
+            "Create a Python script that calculates the factorial of 6 and prints the value.",
+            "Write a Python script that parses the domain name from 'https://github.com/True2456/MLX-DISTILL' and prints it.",
+            "Create a Python script that checks if the string 'racecar' is a palindrome and prints True or False.",
+            "Write a Python script that converts temperature 98.6 Fahrenheit to Celsius and prints the result rounded to one decimal place."
+        ]
+
 class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
     """
     Highly advanced multi-turn ensemble agentic trajectory generator.
     Alternates between multiple teacher paths, runs actions in the SandboxExecutor,
     and constructs a real trace history dynamically.
     """
-
+    
     def __init__(self, model_paths: List[str], workspace_dir: str = "data/sandbox"):
         self.model_paths = model_paths
         self.workspace_dir = workspace_dir
@@ -129,11 +238,10 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         sandbox = SandboxExecutor(self.workspace_dir)
 
         if task_descriptions is None:
-            task_descriptions = [
-                "Write a Python script that calculates the 10th Fibonacci number and print it.",
-                "Create a Python script that formats a list of numbers into a comma-separated string.",
-                "Write a Python script that asserts that the string 'mlx' is uppercase and runs successfully."
-            ]
+            # Dynamically bootstrap unique programming tasks using the first teacher model in the list
+            teacher_for_bootstrap = self.model_paths[0]
+            task_generator = DynamicTaskGenerator(teacher_for_bootstrap)
+            task_descriptions = task_generator.generate_tasks(num_tasks=num_samples)
 
         samples = []
         for i in range(num_samples):
@@ -158,47 +266,83 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     observations_trace = []
                     final_answer = ""
 
+                    def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
+                        import json
+                        brace_depth = 0
+                        in_string = False
+                        escape = False
+                        start_idx = -1
+                        
+                        for i, char in enumerate(text):
+                            if escape:
+                                escape = False
+                                continue
+                            if char == '\\':
+                                if in_string:
+                                    escape = True
+                                continue
+                            if char == '"':
+                                in_string = not in_string
+                                continue
+                            if not in_string:
+                                if char == '{':
+                                    if brace_depth == 0:
+                                        start_idx = i
+                                    brace_depth += 1
+                                elif char == '}':
+                                    brace_depth -= 1
+                                    if brace_depth == 0 and start_idx != -1:
+                                        candidate = text[start_idx:i+1]
+                                        try:
+                                            return json.loads(candidate)
+                                        except json.JSONDecodeError:
+                                            pass
+                        return None
+
                     for turn in range(max_turns):
-                        prompt = (
-                            f"{history}\n"
+                        system_msg = (
                             "You are an AI programming agent executing actions in a local terminal.\n"
-                            "Based on the history above, generate your next reasoning Step in JSON format.\n"
+                            "Based on the history, generate your next reasoning step in JSON format.\n"
                             "The JSON must have the following keys:\n"
                             "- 'thought': Your logical analysis of the current state.\n"
                             "- 'action_type': One of: 'python' (to execute inline code), 'list_dir', or 'none' (if complete).\n"
                             "- 'action_input': The code snippet to run, or empty string.\n"
-                            "- 'final_answer': A descriptive string summarizing the result ONLY if action_type is 'none'.\n"
+                            "- 'final_answer': A descriptive string summarizing the result ONLY if action_type is 'none'.\n\n"
                             "Format Example:\n"
                             "{\n"
                             "  \"thought\": \"I need to write a script to compute the solution.\",\n"
                             "  \"action_type\": \"python\",\n"
                             "  \"action_input\": \"print(10 + 20)\",\n"
                             "  \"final_answer\": \"\"\n"
-                            "}\n"
-                            "Generate the step JSON now:"
+                            "}"
                         )
+                        user_msg = f"Task: {t}\n\nHistory of interactions:\n{history}\n\nGenerate the next JSON step now:"
 
-                        # Generate output
+                        # Use tokenizer's chat template if supported
+                        if hasattr(tokenizer, "apply_chat_template"):
+                            messages = [
+                                {"role": "system", "content": system_msg},
+                                {"role": "user", "content": user_msg}
+                            ]
+                            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                        else:
+                            prompt = f"{system_msg}\n\n{user_msg}"
+
+                        # Generate output with high token budget to prevent truncations
                         response = mlx_lm.generate(
                             model,
                             tokenizer,
                             prompt=prompt,
-                            max_tokens=300,
+                            max_tokens=1024,
                             verbose=False
                         )
 
                         clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
 
-                        # Parse JSON
-                        try:
-                            start_idx = clean_resp.find('{')
-                            end_idx = clean_resp.rfind('}')
-                            if start_idx == -1 or end_idx == -1:
-                                raise ValueError("No JSON block found")
-
-                            step = json.loads(clean_resp[start_idx:end_idx+1])
-                        except Exception as parse_err:
-                            print(f"Failed to parse teacher response: {parse_err}. Response was: {clean_resp}")
+                        # Robustly extract JSON block
+                        step = extract_first_json(clean_resp)
+                        if step is None:
+                            print(f"Failed to parse teacher response with extract_first_json. Response was: {clean_resp}")
                             print("Running fallback rule: Using high-quality default trajectory for smoke tests.")
                             step = {
                                 "thought": "I will write a Python script to execute the programming task.",
