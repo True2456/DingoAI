@@ -156,6 +156,56 @@ python mlx_foundation/src/main.py --mode generate-only --samples 100 --output da
 python mlx_foundation/src/main.py --mode train-only --data data/batch.jsonl
 ```
 
+## Commercial Dataset Exporter (High-Fidelity Packaging)
+
+The framework includes a zero-touch **Commercial Dataset Exporter** that packages raw agent trajectories into a premium, commercial-grade dataset format (fully compliant with **ShareGPT** and **HuggingFace** conversational formats). 
+
+This dataset format is highly valuable for model developers, licensing, or commercial monetization as it captures complex multi-turn debugging, compiler outputs, and self-correction traces.
+
+### Features
+* **Zero-Touch Automation:** Automatically runs at the end of both `full` self-training runs and `generate-only` standalone phases.
+* **ShareGPT/Axolotl Compliance:** Instantly formatting conversational turns using strict system, human, gpt, and tool roles.
+* **Dual-Fidelity Parsing:** Reconstructs full turns gracefully even from older low-fidelity logs, and records high-fidelity trace structures natively for all future runs.
+* **Trace Verification Tagging:** Injects specific teacher model origin tags and sandbox certification metadata into every entry.
+
+### Usage
+
+To manually compile or update your commercial dataset file at any time, run:
+```bash
+./mlx_foundation/venv/bin/python mlx_foundation/src/utils/export_dataset.py
+```
+
+### Premium JSON Structure
+The exporter writes to `data/mlx_commercial_agent_trajectories_v1.json` with the following clean, highly marketable schema:
+```json
+[
+  {
+    "id": "mlx_agent_traj_1_0001",
+    "metadata": {
+      "task_description": "Write a Python script that calculates...",
+      "verified_sandbox_success": true,
+      "teacher_model_origin": "/Users/true/.../Qwen3-Coder-Next-MLX-8bit",
+      "format_version": "1.1-HighFidelity"
+    },
+    "conversations": [
+      { "from": "system", "value": "You are a local sandboxed Python..." },
+      { "from": "human", "value": "Write a Python script that calculates..." },
+      { "from": "gpt", "value": "[THOUGHT]I need to...\n[ACTION]Action (python): ..." },
+      { "from": "tool", "value": "[OBS]120[END]" },
+      { "from": "gpt", "value": "[OUTPUT]Execution completed successfully.[END]" }
+    ],
+    "turns_trace": [
+      {
+        "turn": 1,
+        "thought": "I need to implement a recursive factorial...",
+        "action": { "type": "python", "input": "print(120)" },
+        "observation": { "stdout": "120\n", "stderr": "", "success": true }
+      }
+    ]
+  }
+]
+```
+
 ## Output Structure
 
 ```
