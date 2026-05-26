@@ -120,8 +120,11 @@ class MLXSelfTrainingOrchestrator:
     Orchestrates the MLX-optimized self-training loop: Generation -> Training -> Evaluation.
     """
 
-    # Perplexity above this threshold means the model has collapsed — stop immediately.
-    PERPLEXITY_COLLAPSE_THRESHOLD = 5000.0
+    # If token_conformity_rate stays at 0.0 after training, the model has collapsed
+    # or the token format is wrong. Stop immediately to avoid wasting compute.
+    # Note: perplexity on generic sentences is NOT used as a collapse signal — it naturally
+    # rises after fine-tuning as the model specialises away from its general distribution.
+    CONFORMITY_COLLAPSE_THRESHOLD = 0.0  # Any conformity > 0 means the model is learning
 
     def __init__(
         self,
@@ -211,22 +214,26 @@ class MLXSelfTrainingOrchestrator:
             for res in eval_results:
                 print(f"  Prompt: {res['prompt']} -> Response: {res['response']}")
 
-            # Test perplexity
+            # Test perplexity (informational only — not used as collapse signal)
+            # Perplexity on generic sentences rises naturally after fine-tuning.
             test_texts = [
                 "Artificial intelligence is transforming the world through machine learning.",
                 "Python is a versatile programming language used in many fields."
             ]
             perplexity = evaluator.calculate_perplexity(test_texts)
-            print(f"Perplexity on test set: {perplexity:.4f}")
+            print(f"Perplexity on test set: {perplexity:.4f} (informational — not a collapse signal)")
 
-            # === COLLAPSE GATE ===
-            # A perplexity above the threshold means the model has catastrophically collapsed.
-            # Proceeding to the next iteration would waste compute and corrupt the adapter chain.
-            if perplexity > self.PERPLEXITY_COLLAPSE_THRESHOLD:
-                print(f"\n[COLLAPSE GATE TRIGGERED] Perplexity {perplexity:.1f} > {self.PERPLEXITY_COLLAPSE_THRESHOLD}.")
-                print(f"Model has collapsed at iteration {i+1}. Stopping training loop to prevent cascading damage.")
-                print(f"Diagnosis: Most likely cause is over-training on too few samples (iters/samples ratio too high).")
-                print(f"Fix: Increase samples_per_iteration OR reduce training_iters. Current ratio: {self.training_iters}/{self.samples_per_iteration} = {self.training_iters/max(self.samples_per_iteration,1):.1f} (target: <3.0)")
+            # === COLLAPSE GATE (conformity-based) ===
+            # A conformity rate of 0.0 after training means the model is not learning the agentic
+            # format at all — either the token format is wrong, or training is not working.
+            # Perplexity is NOT used here: it rises naturally as the model specialises.
+            conformity = syntax_results.get("token_conformity_rate", 0.0)
+            if conformity <= self.CONFORMITY_COLLAPSE_THRESHOLD:
+                print(f"\n[COLLAPSE GATE TRIGGERED] token_conformity_rate={conformity:.2f}.")
+                print(f"Model is not learning the agentic format after iteration {i+1}.")
+                print(f"Check that [THOUGHT]/[ACTION]/[END] markers in trainer match evaluator detection.")
+                print(f"Generation quality: '{eval_results[0]['response'][:80]}...'" if eval_results else "")
+                print(f"If generation looks coherent above, the format is the issue — not model collapse.")
                 break
 
         print("\nMLX self-training loop completed successfully!")

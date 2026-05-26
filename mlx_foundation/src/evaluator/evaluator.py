@@ -75,9 +75,9 @@ class MLXEvaluator:
         """
         Evaluates the student model's tool-calling loop and syntax capabilities.
         Checks for:
-        1. Token-wrapped Conformity: Does the generated action contain <|thought|> and <|action|> tags?
+        1. Token-wrapped Conformity: Does the output contain [THOUGHT] and [ACTION] markers?
         2. Field Accuracy: Does it contain non-empty thought and action sections?
-        3. Action Type validity: Does it select a valid action_type ('python', 'list_dir', or 'none')?
+        3. Action Type validity: Does the action section start with 'python:', 'list_dir:', or 'none:'?
         """
         conformity_count = 0
         valid_fields_count = 0
@@ -100,21 +100,21 @@ class MLXEvaluator:
             )
             clean_resp = response[len(formatted):].strip() if response.startswith(formatted) else response.strip()
 
-            # Check for <|thought|> and <|action|> tags
-            has_thought_tag = "<|thought|>" in clean_resp and "<|end|>" in clean_resp
-            has_action_tag = "<|action|>" in clean_resp
+            # Check for [THOUGHT] and [ACTION] markers (plain text, tokenizer-safe)
+            has_thought_tag = "[THOUGHT]" in clean_resp and "[END]" in clean_resp
+            has_action_tag = "[ACTION]" in clean_resp
             
             if has_thought_tag and has_action_tag:
                 conformity_count += 1
                 
                 # Extract thought and action content
                 try:
-                    thought_start = clean_resp.find("<|thought|>") + len("<|thought|>")
-                    thought_end = clean_resp.find("<|end|>", thought_start)
+                    thought_start = clean_resp.find("[THOUGHT]") + len("[THOUGHT]")
+                    thought_end = clean_resp.find("[END]", thought_start)
                     thought_content = clean_resp[thought_start:thought_end].strip()
                     
-                    action_start = clean_resp.find("<|action|>", thought_end) + len("<|action|>")
-                    action_end = clean_resp.find("<|end|>", action_start)
+                    action_start = clean_resp.find("[ACTION]", thought_end) + len("[ACTION]")
+                    action_end = clean_resp.find("[END]", action_start)
                     action_content = clean_resp[action_start:action_end].strip()
                     
                     if thought_content and action_content:

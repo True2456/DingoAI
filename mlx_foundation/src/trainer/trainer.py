@@ -69,11 +69,15 @@ class MLXTrainer:
                     # First sub-step: prompt = task; completion = thought + action.
                     # Second sub-step: prompt = task + thought + action + observation; completion = final output.
                     
-                    # Sub-step 1: Learn to reason and act
+                    # Sub-step 1: Learn to reason and act.
+                    # Using [THOUGHT]/[ACTION]/[END] markers instead of <|thought|> style tags.
+                    # Reason: Gemma-4 treats <|...|> as its own special token prefix, causing
+                    # the tokenizer to split our tags into <|channel> + thought — corrupting learning.
+                    # Plain square-bracket markers tokenize cleanly on every model.
                     prompt_1 = f"Task: {sample.get('instruction', '')}\n"
                     completion_1 = (
-                        f"<|thought|>{sample['thought']}<|end|>\n"
-                        f"<|action|>{sample['actions']}<|end|>\n"
+                        f"[THOUGHT]{sample['thought']}[END]\n"
+                        f"[ACTION]{sample['actions']}[END]\n"
                     )
                     f.write(json.dumps({"prompt": prompt_1, "completion": completion_1}) + "\n")
 
@@ -84,7 +88,7 @@ class MLXTrainer:
                         f"Action: {sample['actions']}\n"
                         f"Observation: {sample['observation']}\n"
                     )
-                    completion_2 = f"<|output|>{sample['output']}<|end|>"
+                    completion_2 = f"[OUTPUT]{sample['output']}[END]"
                     f.write(json.dumps({"prompt": prompt_2, "completion": completion_2}) + "\n")
                 else:
                     # Standard completion format
