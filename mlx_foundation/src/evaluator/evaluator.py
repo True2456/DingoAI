@@ -25,24 +25,44 @@ class MLXEvaluator:
         else:
             self.model, self.tokenizer = mlx_lm.load(model_path)
 
-    def evaluate_generation(self, test_prompts: List[str], max_new_tokens: int = 150) -> List[Dict[str, str]]:
+    def _apply_template(self, text: str) -> str:
+        """
+        Wraps a raw text string in the model's chat template so generation
+        starts from the correct distribution.  Without this, chat-pretrained
+        models immediately fall into repetition attractors.
+        """
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            messages = [{"role": "user", "content": text}]
+            try:
+                return self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+            except Exception:
+                pass  # Fallback to raw text if template fails
+        return text
+
+    def evaluate_generation(self, test_prompts: List[str], max_new_tokens: int = 200) -> List[Dict[str, str]]:
         """
         Generates responses for a set of test prompts using MLX.
+        Prompts are wrapped in the model's chat template to avoid repetition loops.
         """
         results = []
         print(f"Evaluating {len(test_prompts)} prompts with MLX...")
 
         for prompt in test_prompts:
+            formatted = self._apply_template(prompt)
             response = mlx_lm.generate(
                 self.model,
                 self.tokenizer,
-                prompt=prompt,
+                prompt=formatted,
                 max_tokens=max_new_tokens,
                 verbose=False
             )
 
-            # Clean response (remove prompt if it was returned)
-            clean_response = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
+            # Strip the formatted prompt prefix if echoed back
+            clean_response = response[len(formatted):].strip() if response.startswith(formatted) else response.strip()
 
             results.append({
                 "prompt": prompt,
@@ -67,17 +87,18 @@ class MLXEvaluator:
         print(f"Evaluating agentic syntax on {total_eval} programming tasks...")
         
         for task in test_tasks:
-            # Match the exact training prompt format
-            prompt = f"Task: {task}\n"
+            # Match the exact training prompt format, wrapped in chat template
+            raw_prompt = f"Task: {task}\n"
+            formatted = self._apply_template(raw_prompt)
 
             response = mlx_lm.generate(
                 self.model,
                 self.tokenizer,
-                prompt=prompt,
+                prompt=formatted,
                 max_tokens=256,
                 verbose=False
             )
-            clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
+            clean_resp = response[len(formatted):].strip() if response.startswith(formatted) else response.strip()
 
             # Check for <|thought|> and <|action|> tags
             has_thought_tag = "<|thought|>" in clean_resp and "<|end|>" in clean_resp

@@ -19,13 +19,15 @@ class MLXTrainer:
         self,
         model_path: str,
         output_dir: str = "models/mlx_output",
-        learning_rate: float = 1e-5,
+        learning_rate: float = 3e-6,  # 3e-6 is empirically safer for MoE; 1e-5 caused collapse
         iters: int = 100,
         batch_size: int = 1,
         adapter_path: Optional[str] = None
     ):
         self.model_path = model_path
         self.output_dir = output_dir
+        # 3e-6: empirically safer for MoE models where routing gates are sensitive.
+        # 1e-5 caused the routing gates to over-specialize on 20 samples in <100 steps.
         self.learning_rate = learning_rate
         self.iters = iters
         self.batch_size = batch_size
@@ -109,17 +111,21 @@ class MLXTrainer:
             print("Loading base model...")
             model, tokenizer = mlx_lm.load(self.model_path)
 
-        # Setup LoRA config
+        # LoRA config:
+        # rank=16, alpha=32: standard 2x convention. Higher rank gives each layer more
+        # expressive bandwidth — important because we're only training 8 out of ~70+ layers.
         lora_config = {
-            "rank": 8,
-            "alpha": 16,
+            "rank": 16,
+            "alpha": 32,
             "scale": 1.0,
             "dropout": 0.05,
         }
 
-        # Setup LoRA weights if starting from scratch
+        # Setup LoRA weights if starting from scratch.
+        # num_layers=8: For a 26B MoE, 1 LoRA layer covers ~0.01% of parameters.
+        # 8 layers gives enough gradient signal to actually reshape the model's behavior.
         if not self.adapter_path:
-            mlx_lm.lora.linear_to_lora_layers(model, num_layers=1, config=lora_config)
+            mlx_lm.lora.linear_to_lora_layers(model, num_layers=8, config=lora_config)
 
         # Now create optimizer only for the trainable parameters
         optimizer = optim.Adam(learning_rate=self.learning_rate)
@@ -159,7 +165,7 @@ class MLXTrainer:
         config_path = os.path.join(self.output_dir, "adapter_config.json")
         with open(config_path, "w") as f:
             json.dump({
-                "num_layers": 1,
+                "num_layers": 8,
                 "lora_parameters": lora_config,
                 "fine_tune_type": "lora"
             }, f, indent=4)

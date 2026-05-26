@@ -14,6 +14,9 @@ class MLXSelfTrainingOrchestrator:
     Orchestrates the MLX-optimized self-training loop: Generation -> Training -> Evaluation.
     """
 
+    # Perplexity above this threshold means the model has collapsed — stop immediately.
+    PERPLEXITY_COLLAPSE_THRESHOLD = 5000.0
+
     def __init__(
         self,
         base_model_path: str,
@@ -110,6 +113,16 @@ class MLXSelfTrainingOrchestrator:
             perplexity = evaluator.calculate_perplexity(test_texts)
             print(f"Perplexity on test set: {perplexity:.4f}")
 
+            # === COLLAPSE GATE ===
+            # A perplexity above the threshold means the model has catastrophically collapsed.
+            # Proceeding to the next iteration would waste compute and corrupt the adapter chain.
+            if perplexity > self.PERPLEXITY_COLLAPSE_THRESHOLD:
+                print(f"\n[COLLAPSE GATE TRIGGERED] Perplexity {perplexity:.1f} > {self.PERPLEXITY_COLLAPSE_THRESHOLD}.")
+                print(f"Model has collapsed at iteration {i+1}. Stopping training loop to prevent cascading damage.")
+                print(f"Diagnosis: Most likely cause is over-training on too few samples (iters/samples ratio too high).")
+                print(f"Fix: Increase samples_per_iteration OR reduce training_iters. Current ratio: {self.training_iters}/{self.samples_per_iteration} = {self.training_iters/max(self.samples_per_iteration,1):.1f} (target: <3.0)")
+                break
+
         print("\nMLX self-training loop completed successfully!")
         print(f"Final model/adapter located at: {current_adapter_path}")
 
@@ -151,12 +164,15 @@ if __name__ == "__main__":
         )
     else:
         print("Configuring loop for FULL DISTILLATION RUN...")
+        # Rule of thumb: training_iters should be ~2x samples_per_iteration.
+        # 100 samples * 2 = 200 iters keeps the model in the generalization regime.
+        # Previously: 20 samples * 500 iters = 25x ratio → catastrophic memorization.
         orchestrator = MLXSelfTrainingOrchestrator(
             base_model_path=base_model,
             iterations=3,
-            samples_per_iteration=20,
+            samples_per_iteration=100,
             generator_type="agentic",
-            training_iters=500,
+            training_iters=200,
             resume_adapter_path=args.resume
         )
 
