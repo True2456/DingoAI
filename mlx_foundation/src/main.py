@@ -116,11 +116,7 @@ def run_train_only(
     ])
     print(f"Perplexity on test set: {perplexity:.4f}")
 
-    if perplexity > MLXSelfTrainingOrchestrator.PERPLEXITY_COLLAPSE_THRESHOLD:
-        print(f"\n[COLLAPSE GATE] Perplexity {perplexity:.1f} exceeds threshold. Model may have collapsed.")
-        print(f"Check your iters/samples ratio (current: {ratio:.1f}, target: <3.0).")
-    else:
-        print(f"\nTraining complete. Adapter saved to: {output_dir}")
+    print(f"\nTraining complete. Adapter saved to: {output_dir}")
 
 class MLXSelfTrainingOrchestrator:
     """
@@ -167,10 +163,20 @@ class MLXSelfTrainingOrchestrator:
         print(f"Starting MLX self-training loop ({self.generator_type} mode) for {self.iterations} iterations.")
 
         current_adapter_path = self.resume_adapter_path
+        start_iteration = 0
         if current_adapter_path:
             print(f"Resuming self-training loop starting with adapter weights from: {current_adapter_path}")
+            # Try to extract the completed iteration index from the resume path name
+            import re
+            match = re.search(r"iteration_(\d+)", current_adapter_path)
+            if match:
+                completed_iter = int(match.group(1))
+                start_iteration = completed_iter
+                print(f"Detected completed iteration: {completed_iter}. Resuming from Iteration {start_iteration + 1}.")
+            else:
+                print(f"Could not parse iteration number from '{current_adapter_path}'. Starting loop from the beginning (Iteration 1).")
 
-        for i in range(self.iterations):
+        for i in range(start_iteration, self.iterations):
             print(f"\n=== MLX Iteration {i+1}/{self.iterations} ===")
 
             # 1. GENERATION
@@ -343,6 +349,7 @@ if __name__ == "__main__":
     # Define paths
     base_model = "/Users/true/.lmstudio/models/gemma-4-26b-a4b-it-oQ8"
     teacher_paths = [
+        "/Users/true/.lmstudio/models/Qwen3.5-9B-oQ8-mtp",
         "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
         "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
     ]

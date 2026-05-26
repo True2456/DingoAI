@@ -146,8 +146,8 @@ class DynamicTaskGenerator:
             system_msg = (
                 "You are an expert curriculum designer. Brainstorm a list of unique and diverse Python programming tasks "
                 "that can be executed and verified in a simple local terminal sandbox.\n"
-                "Each task must be a single sentence, concise, and require writing a short Python script that "
-                "performs some calculations, data processing, string parsing, or filesystem checking, and prints the result.\n"
+                "Each task must be a single sentence, concise, require computing a result dynamically, and "
+                "be structured such that the solution can be verified using self-contained assertions (e.g. comparing outputs to expected test cases).\n"
                 "Do NOT include any markdown code blocks or conversational text. Return ONLY a JSON list of strings.\n\n"
                 "Example output:\n"
                 "[\n"
@@ -311,8 +311,16 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         os.makedirs(self.workspace_dir, exist_ok=True)
 
         if task_descriptions is None:
-            # Dynamically bootstrap unique programming tasks using the first teacher model in the list
+            # Dynamically bootstrap unique programming tasks using a larger teacher model
+            # (preferring the coder model or the largest model in the list)
             teacher_for_bootstrap = self.model_paths[0]
+            if len(self.model_paths) > 1:
+                for path in self.model_paths:
+                    path_lower = path.lower()
+                    if 'coder' in path_lower or '31b' in path_lower or '35b' in path_lower or '36b' in path_lower:
+                        teacher_for_bootstrap = path
+                        break
+            
             task_generator = DynamicTaskGenerator(teacher_for_bootstrap)
             task_descriptions = task_generator.generate_tasks(num_tasks=num_samples)
 
@@ -386,11 +394,15 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "- 'action_type': One of: 'python' (to execute inline code), 'list_dir', or 'none' (if complete).\n"
                             "- 'action_input': The code snippet to run, or empty string.\n"
                             "- 'final_answer': A descriptive string summarizing the result ONLY if action_type is 'none'.\n\n"
+                            "CRITICAL: Do NOT hardcode final results. Always write clean Python code to compute results. "
+                            "You MUST include self-verifying test assertions (using 'assert') at the end of your script "
+                            "to programmatically prove your solution is correct. If assertions fail, the script will crash, "
+                            "which is the correct behavior for incorrect logic.\n\n"
                             "Format Example:\n"
                             "{\n"
-                            "  \"thought\": \"I need to write a script to compute the solution.\",\n"
+                            "  \"thought\": \"I need to write a script to compute the solution and assert correctness.\",\n"
                             "  \"action_type\": \"python\",\n"
-                            "  \"action_input\": \"print(10 + 20)\",\n"
+                            "  \"action_input\": \"def solve(x): return x * 2\\n\\n# Assertions\\nassert solve(5) == 10\\nprint('Verified')\",\n"
                             "  \"final_answer\": \"\"\n"
                             "}"
                         )
@@ -505,9 +517,13 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     return None
 
             for attempt in range(max_attempts):
-                # Alternate teachers on retry to see if another teacher solves it better
-                teacher_idx = (i + attempt) % len(self.model_paths)
-                teacher_path = self.model_paths[teacher_idx]
+                # Attempt 0 always uses the first teacher (the 9B model).
+                # Subsequent attempts alternate among the other teachers.
+                if attempt == 0:
+                    teacher_path = self.model_paths[0]
+                else:
+                    other_teachers = self.model_paths[1:] if len(self.model_paths) > 1 else self.model_paths
+                    teacher_path = other_teachers[(i + attempt - 1) % len(other_teachers)]
 
                 print(f"Generating agentic trajectory (Attempt {attempt+1}/{max_attempts}) using teacher {teacher_path} for task: '{task}'")
                 
