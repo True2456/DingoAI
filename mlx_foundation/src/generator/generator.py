@@ -318,6 +318,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     observations_trace = []
                     final_answer = ""
                     sandbox_success = True
+                    turns_array = []
 
                     def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
                         import json
@@ -411,20 +412,40 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         thought_trace.append(thought)
                         actions_trace.append(f"{action_type}: {action_input}")
 
+                        turn_data = {
+                            "turn": turn + 1,
+                            "thought": thought,
+                            "action": {
+                                "type": action_type,
+                                "input": action_input
+                            },
+                            "observation": {
+                                "stdout": "",
+                                "stderr": "",
+                                "success": True
+                            }
+                        }
+
                         if action_type == "none" or not action_input:
                             final_answer = step.get("final_answer", "Task complete.")
                             observations_trace.append("Environment complete.")
+                            turn_data["observation"]["stdout"] = "Environment complete."
+                            turns_array.append(turn_data)
                             break
 
                         # Execute in Sandbox
                         exec_res = sandbox.execute(action_type, action_input)
                         if exec_res.get("success") and not exec_res.get("stderr"):
                             obs = exec_res.get("stdout", "") or exec_res.get("message", "Success.")
+                            turn_data["observation"]["stdout"] = obs
                         else:
                             sandbox_success = False
                             obs = exec_res.get("stderr", "") or exec_res.get("error", "Error.")
+                            turn_data["observation"]["stderr"] = obs
+                            turn_data["observation"]["success"] = False
 
                         observations_trace.append(obs)
+                        turns_array.append(turn_data)
 
                         # Update interaction history
                         history += (
@@ -446,7 +467,9 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "actions": " | ".join(actions_trace),
                             "observation": " | ".join(observations_trace),
                             "output": final_answer or "Execution completed successfully.",
-                            "sandbox_success": sandbox_success
+                            "sandbox_success": sandbox_success,
+                            "turns": turns_array,
+                            "teacher_model": path
                         }
                 except Exception as e:
                     print(f"Error during teacher ensemble loop: {e}")
