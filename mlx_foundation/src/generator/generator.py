@@ -340,12 +340,29 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                 try:
                     import mlx_lm
                     import json
-                    if path in self.model_cache:
-                        model, tokenizer = self.model_cache[path]
+                    # Determine if we should cache this model based on size (threshold: 45 GB)
+                    # This prevents caching the massive Qwen Coder Next (79GB) while caching smaller ones.
+                    should_cache = True
+                    try:
+                        model_size = 0
+                        for root_dir, _, files_list in os.walk(path):
+                            for file_name in files_list:
+                                model_size += os.path.getsize(os.path.join(root_dir, file_name))
+                        if model_size > 45 * 1024 * 1024 * 1024:
+                            should_cache = False
+                    except Exception:
+                        pass
+
+                    if should_cache:
+                        if path in self.model_cache:
+                            model, tokenizer = self.model_cache[path]
+                        else:
+                            print(f"Loading teacher model {path} into RAM cache...")
+                            model, tokenizer = mlx_lm.load(path)
+                            self.model_cache[path] = (model, tokenizer)
                     else:
-                        print(f"Loading teacher model {path} into RAM cache...")
+                        print(f"Loading large teacher model {path} dynamically (not cached to protect RAM)...")
                         model, tokenizer = mlx_lm.load(path)
-                        self.model_cache[path] = (model, tokenizer)
 
                     # Instantiate sandbox isolated exclusively to this jailed workspace
                     sandbox = SandboxExecutor(sandbox_dir)
@@ -498,9 +515,20 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             f"Observation: {obs}\n"
                         )
 
-                    # Keep models cached in RAM, only garbage collect local turn variables
+                    # Keep models cached in RAM, only garbage collect local variables.
+                    # If the model was not cached (larger than 45 GB), explicitly unload it.
+                    if not should_cache:
+                        print(f"Unloading large model {path} to free memory...")
+                        del model
+                        del tokenizer
+                    
                     import gc
                     gc.collect()
+                    try:
+                        import mlx.core as mx
+                        mx.metal.clear_cache()
+                    except ImportError:
+                        pass
 
                     if thought_trace:
                         return {
