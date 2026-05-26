@@ -54,6 +54,7 @@ class SandboxExecutor:
                 [python_bin, tmp_path],
                 capture_output=True,
                 text=True,
+                cwd=self.workspace_dir,
                 timeout=5 # Safe timeout limit
             )
             return {

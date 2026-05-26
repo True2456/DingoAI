@@ -19,15 +19,14 @@ class MLXTrainer:
         self,
         model_path: str,
         output_dir: str = "models/mlx_output",
-        learning_rate: float = 3e-6,  # 3e-6 is empirically safer for MoE; 1e-5 caused collapse
+        learning_rate: float = 1.5e-6,  # 1.5e-6: ultra-stable for MoE models where routing gates are sensitive
         iters: int = 100,
         batch_size: int = 1,
         adapter_path: Optional[str] = None
     ):
         self.model_path = model_path
         self.output_dir = output_dir
-        # 3e-6: empirically safer for MoE models where routing gates are sensitive.
-        # 1e-5 caused the routing gates to over-specialize on 20 samples in <100 steps.
+        # 1.5e-6: empirically safer for MoE models to prevent router and expert collapse
         self.learning_rate = learning_rate
         self.iters = iters
         self.batch_size = batch_size
@@ -61,33 +60,57 @@ class MLXTrainer:
             for sample in samples:
                 if "thought" in sample:
                     # Multi-turn parsing to split history (prompt) from the target action (completion)
-                    # For a single-step trajectory trace in this smoke test:
-                    # prompt is: "Task: <instruction>"
-                    # completion is: "<|thought|><thought><|end|>\n<|action|><actions><|end|>\n<|observation|><obs><|end|>\n<|output|><output><|end|>"
-                    # But we don't want the model to learn to output the observation!
-                    # So we split the completion right before the observation.
-                    # First sub-step: prompt = task; completion = thought + action.
-                    # Second sub-step: prompt = task + thought + action + observation; completion = final output.
+                    # We wrap prompts in the model's native chat template to avoid out-of-distribution shocks.
                     
                     # Sub-step 1: Learn to reason and act.
-                    # Using [THOUGHT]/[ACTION]/[END] markers instead of <|thought|> style tags.
-                    # Reason: Gemma-4 treats <|...|> as its own special token prefix, causing
-                    # the tokenizer to split our tags into <|channel> + thought — corrupting learning.
-                    # Plain square-bracket markers tokenize cleanly on every model.
-                    prompt_1 = f"Task: {sample.get('instruction', '')}\n"
+                    p1_text = f"Task: {sample.get('instruction', '')}"
+                    if hasattr(tokenizer, "apply_chat_template"):
+                        try:
+                            prompt_1 = tokenizer.apply_chat_template(
+                                [{"role": "user", "content": p1_text}],
+                                tokenize=False,
+                                add_generation_prompt=True
+                            )
+                        except Exception:
+                            prompt_1 = f"Task: {sample.get('instruction', '')}\n"
+                    else:
+                        prompt_1 = f"Task: {sample.get('instruction', '')}\n"
+
                     completion_1 = (
                         f"[THOUGHT]{sample['thought']}[END]\n"
                         f"[ACTION]{sample['actions']}[END]\n"
                     )
                     f.write(json.dumps({"prompt": prompt_1, "completion": completion_1}) + "\n")
 
-                    # Sub-step 2: Learn to answer based on real observation
-                    prompt_2 = (
-                        f"Task: {sample.get('instruction', '')}\n"
-                        f"Thought: {sample['thought']}\n"
-                        f"Action: {sample['actions']}\n"
-                        f"Observation: {sample['observation']}\n"
-                    )
+                    # Sub-step 2: Learn to answer based on real observation (Multi-turn chat flow)
+                    p2_content = f"[THOUGHT]{sample['thought']}[END]\n[ACTION]{sample['actions']}[END]\n"
+                    messages_2 = [
+                        {"role": "user", "content": p1_text},
+                        {"role": "assistant", "content": p2_content},
+                        {"role": "user", "content": f"Observation: {sample['observation']}"}
+                    ]
+                    if hasattr(tokenizer, "apply_chat_template"):
+                        try:
+                            prompt_2 = tokenizer.apply_chat_template(
+                                messages_2,
+                                tokenize=False,
+                                add_generation_prompt=True
+                            )
+                        except Exception:
+                            prompt_2 = (
+                                f"Task: {sample.get('instruction', '')}\n"
+                                f"Thought: {sample['thought']}\n"
+                                f"Action: {sample['actions']}\n"
+                                f"Observation: {sample['observation']}\n"
+                            )
+                    else:
+                        prompt_2 = (
+                            f"Task: {sample.get('instruction', '')}\n"
+                            f"Thought: {sample['thought']}\n"
+                            f"Action: {sample['actions']}\n"
+                            f"Observation: {sample['observation']}\n"
+                        )
+
                     completion_2 = f"[OUTPUT]{sample['output']}[END]"
                     f.write(json.dumps({"prompt": prompt_2, "completion": completion_2}) + "\n")
                 else:
@@ -96,7 +119,19 @@ class MLXTrainer:
                     inp = sample.get("input", "")
                     resp = sample.get("output", "")
                     
-                    prompt = f"Instruction: {inst}\nInput: {inp}\n"
+                    p_text = f"Instruction: {inst}\nInput: {inp}\n"
+                    if hasattr(tokenizer, "apply_chat_template"):
+                        try:
+                            prompt = tokenizer.apply_chat_template(
+                                [{"role": "user", "content": p_text}],
+                                tokenize=False,
+                                add_generation_prompt=True
+                            )
+                        except Exception:
+                            prompt = p_text
+                    else:
+                        prompt = p_text
+
                     completion = f"Response: {resp}"
                     f.write(json.dumps({"prompt": prompt, "completion": completion}) + "\n")
 
@@ -116,20 +151,23 @@ class MLXTrainer:
             model, tokenizer = mlx_lm.load(self.model_path)
 
         # LoRA config:
-        # rank=16, alpha=32: standard 2x convention. Higher rank gives each layer more
-        # expressive bandwidth — important because we're only training 8 out of ~70+ layers.
+        # rank=16, alpha=32: standard 2x convention.
+        # keys: explicitly restrict LoRA to self-attention projections.
+        # This completely avoids updating the MoE router gates and expert Feed-Forward blocks,
+        # preventing expert routing collapse and preserving the base model's general intelligence.
         lora_config = {
             "rank": 16,
             "alpha": 32,
             "scale": 1.0,
             "dropout": 0.05,
+            "keys": ["self_attn.q_proj", "self_attn.v_proj", "self_attn.k_proj", "self_attn.o_proj"]
         }
 
         # Setup LoRA weights if starting from scratch.
-        # num_layers=8: For a 26B MoE, 1 LoRA layer covers ~0.01% of parameters.
-        # 8 layers gives enough gradient signal to actually reshape the model's behavior.
+        # num_layers=16: For a 26B MoE, 8 layers covers very little parameters.
+        # 16 layers gives enough gradient signal to actually reshape the model's behavior across experts/routing gates.
         if not self.adapter_path:
-            mlx_lm.lora.linear_to_lora_layers(model, num_layers=8, config=lora_config)
+            mlx_lm.lora.linear_to_lora_layers(model, num_layers=16, config=lora_config)
 
         # Now create optimizer only for the trainable parameters
         optimizer = optim.Adam(learning_rate=self.learning_rate)
@@ -180,7 +218,7 @@ class MLXTrainer:
         config_path = os.path.join(self.output_dir, "adapter_config.json")
         with open(config_path, "w") as f:
             json.dump({
-                "num_layers": 8,
+                "num_layers": 16,
                 "lora_parameters": lora_config,
                 "fine_tune_type": "lora"
             }, f, indent=4)

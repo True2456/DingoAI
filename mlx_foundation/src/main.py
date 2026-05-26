@@ -380,15 +380,14 @@ if __name__ == "__main__":
 
     else:  # full
         print("Configuring loop for FULL DISTILLATION RUN...")
-        # Rule of thumb: training_iters should be ~2x samples_per_iteration.
-        # 100 samples * 2 = 200 iters keeps the model in the generalization regime.
-        # Previously: 20 samples * 500 iters = 25x ratio → catastrophic memorization.
+        # Rule of thumb for MoE 26B/4B: requires more steps to update routing weights.
+        # 100 samples * 6 = 600 iters (3 epochs) to inject structure without overfitting.
         orchestrator = MLXSelfTrainingOrchestrator(
             base_model_path=base_model,
             iterations=3,
             samples_per_iteration=100,
             generator_type="agentic",
-            training_iters=200,
+            training_iters=600,
             resume_adapter_path=args.resume
         )
         orchestrator.run(teacher_paths=teacher_paths)

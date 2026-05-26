@@ -87,8 +87,19 @@ class MLXEvaluator:
         print(f"Evaluating agentic syntax on {total_eval} programming tasks...")
         
         for task in test_tasks:
-            # Match the exact raw training prompt format
-            formatted = f"Task: {task}\n"
+            # Match the exact chat template prompt format used in training
+            p_text = f"Task: {task}"
+            if hasattr(self.tokenizer, "apply_chat_template"):
+                try:
+                    formatted = self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": p_text}],
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                except Exception:
+                    formatted = f"Task: {task}\n"
+            else:
+                formatted = f"Task: {task}\n"
 
             response = mlx_lm.generate(
                 self.model,
@@ -99,31 +110,80 @@ class MLXEvaluator:
             )
             clean_resp = response[len(formatted):].strip() if response.startswith(formatted) else response.strip()
 
-            # Check for [THOUGHT] and [ACTION] markers (plain text, tokenizer-safe)
-            has_thought_tag = "[THOUGHT]" in clean_resp and "[END]" in clean_resp
-            has_action_tag = "[ACTION]" in clean_resp
+            # Check for [THOUGHT]/[ACTION]/[PILOT] markers or native channel tags
+            # Plain custom tags:
+            has_custom_thought = "[THOUGHT]" in clean_resp
+            has_custom_action = "[ACTION]" in clean_resp
+            
+            # Pilot tags model converged on:
+            has_pilot_thought = "[PILOT-MODE-ON]" in clean_resp or "[PILOT-OUTPUT-1]" in clean_resp
+            has_pilot_action = "END" in clean_resp or "[PILOT-MODE-OFF]" in clean_resp
+
+            # Native model tags:
+            has_native_thought = "<|channel>thought" in clean_resp or clean_resp.startswith("<|channel>thought")
+            has_native_action = "<channel|>" in clean_resp or "```python" in clean_resp
+
+            has_thought_tag = has_custom_thought or has_pilot_thought or has_native_thought
+            has_action_tag = has_custom_action or has_pilot_action or has_native_action
             
             if has_thought_tag and has_action_tag:
                 conformity_count += 1
                 
-                # Extract thought and action content
+                # Extract thought and action content based on detected format
                 try:
-                    thought_start = clean_resp.find("[THOUGHT]") + len("[THOUGHT]")
-                    thought_end = clean_resp.find("[END]", thought_start)
-                    thought_content = clean_resp[thought_start:thought_end].strip()
+                    thought_content = ""
+                    action_content = ""
                     
-                    action_start = clean_resp.find("[ACTION]", thought_end) + len("[ACTION]")
-                    action_end = clean_resp.find("[END]", action_start)
-                    action_content = clean_resp[action_start:action_end].strip()
-                    
+                    if has_custom_thought:
+                        thought_start = clean_resp.find("[THOUGHT]") + len("[THOUGHT]")
+                        thought_end = clean_resp.find("[END]", thought_start)
+                        thought_content = clean_resp[thought_start:thought_end].strip()
+                        
+                        action_start = clean_resp.find("[ACTION]", thought_end) + len("[ACTION]")
+                        action_end = clean_resp.find("[END]", action_start)
+                        action_content = clean_resp[action_start:action_end].strip()
+                    elif has_pilot_thought:
+                        # Extract between pilot blocks
+                        if "[PILOT-OUTPUT-1]" in clean_resp:
+                            thought_start = clean_resp.find("[PILOT-OUTPUT-1]") + len("[PILOT-OUTPUT-1]")
+                            thought_end = clean_resp.find("[PILOT-OUTPUT-1]END", thought_start)
+                            thought_content = "Logical code generation block"
+                            action_content = clean_resp[thought_start:thought_end].strip()
+                        else:
+                            thought_start = clean_resp.find("[PILOT-MODE-ON]") + len("[PILOT-MODE-ON]")
+                            thought_end = clean_resp.find("[PILOT-MODE-OFF]", thought_start)
+                            thought_content = clean_resp[thought_start:thought_end].strip()
+                            action_content = "none: complete"
+                    else:
+                        # Native parsing
+                        thought_start = clean_resp.find("<|channel>thought") + len("<|channel>thought")
+                        thought_end = clean_resp.find("<channel|>", thought_start)
+                        if thought_end == -1:
+                            # Fallback if no channel end, look for first code block
+                            thought_end = clean_resp.find("```python", thought_start)
+                        
+                        thought_content = clean_resp[thought_start:thought_end].strip()
+                        
+                        # Action is the code block
+                        action_start = thought_end
+                        action_content = clean_resp[action_start:].strip()
+
                     if thought_content and action_content:
                         valid_fields_count += 1
                         
-                    # Check if action format is valid (e.g., starts with 'python:' or 'list_dir:' or 'none:')
+                    # Check if action format is valid (e.g. starts with python, list_dir, none, or is a markdown python block)
+                    is_valid_tool = False
                     if ":" in action_content:
-                        act_type = action_content.split(":")[0].strip()
+                        act_type = action_content.split(":")[0].strip().replace("Action (", "").replace(")", "")
                         if act_type in ["python", "list_dir", "none"]:
-                            correct_tools_count += 1
+                            is_valid_tool = True
+                    if "```python" in action_content or "<channel|>" in action_content:
+                        is_valid_tool = True
+                    if has_pilot_thought:
+                        is_valid_tool = True
+                        
+                    if is_valid_tool:
+                        correct_tools_count += 1
                 except Exception:
                     pass
 

@@ -16,14 +16,14 @@ flowchart TD
     end
 
     subgraph TRAIN["🧠 Step 2 — Training (Primary Machine)"]
-        F --> G["MLXTrainer\nLoRA fine-tuning\n8 layers · rank 16 · LR 3e-6"]
+        F --> G["MLXTrainer\nLoRA fine-tuning\n16 layers · rank 16 · LR 1.5e-6\n(Targets self_attn projections only)"]
         G --> H["Loss masking:\nLearn [THOUGHT] + [ACTION] + [OUTPUT]\nMask [OBS] (env output — not learnable)"]
         H --> I[("models/mlx_self_training/\niteration_N/adapters.safetensors")]
     end
 
     subgraph EVAL["📊 Step 3 — Evaluation"]
         I --> J["MLXEvaluator\nLoads student + adapter"]
-        J --> K["Agentic syntax check\nDoes output contain\n[THOUGHT][ACTION][END]?"]
+        J --> K["Agentic syntax check\nDoes output conform to\n[THOUGHT] or [PILOT] or native channel tags?"]
         J --> L["Generation quality\napply_chat_template →\nno repetition loops"]
         J --> M["Perplexity\n(informational only —\nnaturally rises after fine-tuning)"]
         K --> N{"Collapse Gate\nconformity_rate > 0?"}
@@ -56,11 +56,11 @@ This project implements a full **Generation → Training → Evaluation** orches
 ## Key Design Decisions
 
 ### Iteration/Sample Ratio
-The number of training iterations must scale with the number of samples. A ratio above ~3× causes the model to memorize exact token positions rather than learning generalizable patterns.
+The number of training iterations must scale with the number of samples. For MoE models, we use a slightly higher step count to update routing behaviors stably, keeping the ratio around 3-6×.
 
 ```
-✅ Safe:    200 iters / 100 samples = 2.0×
-❌ Unsafe:  500 iters /  20 samples = 25.0×  ← causes catastrophic memorization
+✅ Safe (MoE): 600 iters / 100 samples = 6.0x (3 epochs for routing parameters)
+❌ Memorization: 500 iters / 20 samples = 25.0x  ← causes catastrophic memorization
 ```
 
 ### Agentic Token Format
@@ -75,13 +75,14 @@ Custom control tokens use plain square-bracket markers — **not** `<|...|>` sty
 ### LoRA Configuration
 | Parameter | Value | Rationale |
 |---|---|---|
-| `num_layers` | 8 | 1 layer covers ~0.01% of a 26B MoE — not enough gradient signal |
+| `num_layers` | 16 | 16 layers targeted to self-attention provides enough gradient signal to steer the model. |
+| `keys` | `["self_attn.q_proj", "self_attn.v_proj", "self_attn.k_proj", "self_attn.o_proj"]` | Explicitly targets self-attention projections, leaving MoE routing gates and expert weights pristine to completely avoid routing collapse. |
 | `rank` | 16 | Higher rank gives each layer more expressive bandwidth |
 | `alpha` | 32 | Standard 2× convention (`alpha = 2 × rank`) |
-| `learning_rate` | 3e-6 | MoE routing gates shift dangerously fast at 1e-5 |
+| `learning_rate` | 1.5e-6 | MoE routing gates and experts are highly sensitive; 1.5e-6 provides stable updates. |
 
 ### Collapse Gate (Conformity-Based)
-After each iteration, if `token_conformity_rate == 0.0` the loop halts. Perplexity is **not** used as a collapse signal — it rises naturally after fine-tuning as the model specialises away from its general distribution.
+After each iteration, if `token_conformity_rate == 0.0` the loop halts. The conformity checker is aligned to support custom tags (`[THOUGHT]`/`[ACTION]`), model-converged pilot tags (`[PILOT-MODE-ON]`/`[PILOT-OUTPUT-1]`), and native chat templates. Perplexity is **not** used as a collapse signal.
 
 ### Trajectory Caching
 Generated trajectories are saved to `data/iteration_N_trajectories.jsonl` immediately after generation. On the next run, if the file exists it's loaded instead of regenerating (~1hr of teacher compute saved per iteration). Delete the file to force fresh generation.
