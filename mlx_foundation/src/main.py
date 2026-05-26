@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from typing import List, Optional
 
 # Add mlx_foundation/src to sys.path so we can import our modules
@@ -8,6 +9,111 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from generator.generator import MLXGenerator, MultiTeacherMLXGenerator, EnsembleAgenticTrajectoryGenerator
 from trainer.trainer import MLXTrainer
 from evaluator.evaluator import MLXEvaluator
+
+
+def run_generate_only(teacher_paths: List[str], num_samples: int, output_path: str):
+    """
+    Standalone generation mode — runs on the second machine (e.g. M3 Max 64GB).
+    Loads only the teacher models, generates agentic coding trajectories, and saves
+    them to a JSONL file. No student model is loaded. No training happens.
+
+    The output file can then be copied to the training machine and fed in via
+    --mode train-only --data <path>.
+    """
+    print(f"=== GENERATE-ONLY MODE ===")
+    print(f"Generating {num_samples} agentic trajectories using teachers: {teacher_paths}")
+    print(f"Output will be saved to: {output_path}")
+
+    generator = EnsembleAgenticTrajectoryGenerator(model_paths=teacher_paths)
+    samples = generator.generate(num_samples=num_samples)
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    with open(output_path, "w") as f:
+        for sample in samples:
+            f.write(json.dumps(sample) + "\n")
+
+    print(f"\nDone. {len(samples)} trajectories saved to: {output_path}")
+    print("Transfer this file to your training machine and run:")
+    print(f"  python src/main.py --mode train-only --data {output_path}")
+
+
+def run_train_only(
+    base_model_path: str,
+    data_path: str,
+    output_dir: str,
+    training_iters: int,
+    resume_adapter_path: Optional[str],
+):
+    """
+    Standalone training mode — reads a pre-generated JSONL file and runs LoRA
+    fine-tuning + evaluation. No teacher models are loaded.
+
+    Use this on the primary machine after receiving a batch file from the
+    generate-only machine.
+    """
+    print(f"=== TRAIN-ONLY MODE ===")
+    print(f"Loading pre-generated data from: {data_path}")
+
+    if not os.path.exists(data_path):
+        print(f"ERROR: Data file not found: {data_path}")
+        sys.exit(1)
+
+    with open(data_path, "r") as f:
+        samples = [json.loads(line) for line in f if line.strip()]
+
+    print(f"Loaded {len(samples)} samples from {data_path}.")
+
+    # Safety check: warn if ratio is dangerous
+    ratio = training_iters / max(len(samples), 1)
+    if ratio > 3.0:
+        print(f"WARNING: iters/samples ratio is {ratio:.1f} (>{3.0}). Risk of memorization.")
+        print(f"Consider reducing --train-iters or generating more samples.")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    trainer = MLXTrainer(
+        model_path=base_model_path,
+        output_dir=output_dir,
+        iters=training_iters,
+        batch_size=1,
+        adapter_path=resume_adapter_path
+    )
+    trainer.train(samples)
+
+    print("\nEvaluating trained model...")
+    evaluator = MLXEvaluator(model_path=base_model_path, adapter_path=output_dir)
+
+    test_tasks = [
+        "Write a Python script that multiplies 12 and 15 and prints the product.",
+        "Create a Python script that counts the letters in 'antigravity'.",
+    ]
+    syntax_results = evaluator.evaluate_agentic_syntax(test_tasks)
+    print("Agentic Syntax Evaluation:")
+    for k, v in syntax_results.items():
+        print(f"  {k}: {v}")
+
+    test_prompts = [
+        "Explain the significance of the Magna Carta.",
+        "What is the capital of Japan?",
+    ]
+    eval_results = evaluator.evaluate_generation(test_prompts)
+    print("Generation Evaluation:")
+    for res in eval_results:
+        print(f"  Prompt: {res['prompt']} -> Response: {res['response']}")
+
+    perplexity = evaluator.calculate_perplexity([
+        "Artificial intelligence is transforming the world through machine learning.",
+        "Python is a versatile programming language used in many fields.",
+    ])
+    print(f"Perplexity on test set: {perplexity:.4f}")
+
+    if perplexity > MLXSelfTrainingOrchestrator.PERPLEXITY_COLLAPSE_THRESHOLD:
+        print(f"\n[COLLAPSE GATE] Perplexity {perplexity:.1f} exceeds threshold. Model may have collapsed.")
+        print(f"Check your iters/samples ratio (current: {ratio:.1f}, target: <3.0).")
+    else:
+        print(f"\nTraining complete. Adapter saved to: {output_dir}")
 
 class MLXSelfTrainingOrchestrator:
     """
@@ -133,15 +239,53 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["smoke", "full"],
+        choices=["smoke", "full", "generate-only", "train-only"],
         default="smoke",
-        help="Run mode: 'smoke' for a quick validation, 'full' for complete training."
+        help=(
+            "Run mode:\n"
+            "  smoke         — quick 1-iteration validation (default)\n"
+            "  full          — full 3-iteration distillation run\n"
+            "  generate-only — generate trajectories and save to JSONL (no student model)\n"
+            "  train-only    — load a pre-generated JSONL and run LoRA training (no teacher models)"
+        )
     )
     parser.add_argument(
         "--resume",
         type=str,
         default=None,
-        help="Optional path to an existing adapter folder to resume training from."
+        help="Path to an existing adapter folder to resume training from (smoke/full/train-only)."
+    )
+    # generate-only flags
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="data/generated_trajectories.jsonl",
+        help="[generate-only] Path to write the generated trajectories JSONL file."
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=100,
+        help="[generate-only] Number of agentic trajectories to generate (default: 100)."
+    )
+    # train-only flags
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="[train-only] Path to a pre-generated JSONL file to train on."
+    )
+    parser.add_argument(
+        "--train-iters",
+        type=int,
+        default=200,
+        help="[train-only] Number of LoRA training iterations (default: 200)."
+    )
+    parser.add_argument(
+        "--train-output",
+        type=str,
+        default="models/mlx_self_training/train_only",
+        help="[train-only] Directory to save the trained adapter (default: models/mlx_self_training/train_only)."
     )
     args = parser.parse_args()
 
@@ -152,7 +296,26 @@ if __name__ == "__main__":
         "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
     ]
 
-    if args.mode == "smoke":
+    if args.mode == "generate-only":
+        run_generate_only(
+            teacher_paths=teacher_paths,
+            num_samples=args.samples,
+            output_path=args.output,
+        )
+
+    elif args.mode == "train-only":
+        if not args.data:
+            print("ERROR: --mode train-only requires --data <path/to/trajectories.jsonl>")
+            sys.exit(1)
+        run_train_only(
+            base_model_path=base_model,
+            data_path=args.data,
+            output_dir=args.train_output,
+            training_iters=args.train_iters,
+            resume_adapter_path=args.resume,
+        )
+
+    elif args.mode == "smoke":
         print("Configuring loop for SMOKE TEST...")
         orchestrator = MLXSelfTrainingOrchestrator(
             base_model_path=base_model,
@@ -162,7 +325,9 @@ if __name__ == "__main__":
             training_iters=15,
             resume_adapter_path=args.resume
         )
-    else:
+        orchestrator.run(teacher_paths=teacher_paths)
+
+    else:  # full
         print("Configuring loop for FULL DISTILLATION RUN...")
         # Rule of thumb: training_iters should be ~2x samples_per_iteration.
         # 100 samples * 2 = 200 iters keeps the model in the generalization regime.
@@ -175,5 +340,5 @@ if __name__ == "__main__":
             training_iters=200,
             resume_adapter_path=args.resume
         )
+        orchestrator.run(teacher_paths=teacher_paths)
 
-    orchestrator.run(teacher_paths=teacher_paths)
