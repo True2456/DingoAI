@@ -55,11 +55,10 @@ class MLXEvaluator:
         """
         Evaluates the student model's tool-calling loop and syntax capabilities.
         Checks for:
-        1. JSON Conformity: Does the generated action compile as a valid JSON?
-        2. Field Accuracy: Does it contain reasoning 'thought', 'action_type', and 'action_input'?
-        3. Logic validity: Does it select a valid action_type ('python', 'list_dir', or 'none')?
+        1. Token-wrapped Conformity: Does the generated action contain <|thought|> and <|action|> tags?
+        2. Field Accuracy: Does it contain non-empty thought and action sections?
+        3. Action Type validity: Does it select a valid action_type ('python', 'list_dir', or 'none')?
         """
-        import json
         conformity_count = 0
         valid_fields_count = 0
         correct_tools_count = 0
@@ -68,17 +67,8 @@ class MLXEvaluator:
         print(f"Evaluating agentic syntax on {total_eval} programming tasks...")
         
         for task in test_tasks:
-            prompt = (
-                f"Task: {task}\n"
-                "You are an AI programming agent executing actions in a local terminal.\n"
-                "Based on the history above, generate your next reasoning Step in JSON format.\n"
-                "The JSON must have the following keys:\n"
-                "- 'thought': Your logical analysis of the current state.\n"
-                "- 'action_type': One of: 'python' (to execute inline code), 'list_dir', or 'none'.\n"
-                "- 'action_input': The code snippet to run, or empty string.\n"
-                "- 'final_answer': A descriptive string summarizing the result ONLY if action_type is 'none'.\n"
-                "Generate the step JSON now:"
-            )
+            # Match the exact training prompt format
+            prompt = f"Task: {task}\n"
 
             response = mlx_lm.generate(
                 self.model,
@@ -89,28 +79,36 @@ class MLXEvaluator:
             )
             clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
 
-            try:
-                start_idx = clean_resp.find('{')
-                end_idx = clean_resp.rfind('}')
-                if start_idx == -1 or end_idx == -1:
-                    raise ValueError("No JSON found")
-                
-                step = json.loads(clean_resp[start_idx:end_idx+1])
+            # Check for <|thought|> and <|action|> tags
+            has_thought_tag = "<|thought|>" in clean_resp and "<|end|>" in clean_resp
+            has_action_tag = "<|action|>" in clean_resp
+            
+            if has_thought_tag and has_action_tag:
                 conformity_count += 1
-
-                # Check keys
-                required = {"thought", "action_type", "action_input", "final_answer"}
-                if required.issubset(step.keys()):
-                    valid_fields_count += 1
-
-                # Check logic
-                if step.get("action_type") in ["python", "list_dir", "none"]:
-                    correct_tools_count += 1
-            except Exception:
-                continue
+                
+                # Extract thought and action content
+                try:
+                    thought_start = clean_resp.find("<|thought|>") + len("<|thought|>")
+                    thought_end = clean_resp.find("<|end|>", thought_start)
+                    thought_content = clean_resp[thought_start:thought_end].strip()
+                    
+                    action_start = clean_resp.find("<|action|>", thought_end) + len("<|action|>")
+                    action_end = clean_resp.find("<|end|>", action_start)
+                    action_content = clean_resp[action_start:action_end].strip()
+                    
+                    if thought_content and action_content:
+                        valid_fields_count += 1
+                        
+                    # Check if action format is valid (e.g., starts with 'python:' or 'list_dir:' or 'none:')
+                    if ":" in action_content:
+                        act_type = action_content.split(":")[0].strip()
+                        if act_type in ["python", "list_dir", "none"]:
+                            correct_tools_count += 1
+                except Exception:
+                    pass
 
         return {
-            "json_conformity_rate": conformity_count / total_eval if total_eval > 0 else 0,
+            "token_conformity_rate": conformity_count / total_eval if total_eval > 0 else 0,
             "field_accuracy_rate": valid_fields_count / total_eval if total_eval > 0 else 0,
             "tool_selection_accuracy": correct_tools_count / total_eval if total_eval > 0 else 0,
             "total_tested": total_eval
