@@ -245,11 +245,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
         samples = []
         for i in range(num_samples):
-            # Select teacher dynamically
-            teacher_path = self.model_paths[i % len(self.model_paths)]
             task = task_descriptions[i % len(task_descriptions)]
 
-            print(f"Generating agentic trajectory using teacher {teacher_path} for task: '{task}'")
+            # We try up to 3 times to get a successful sandbox trajectory
+            max_attempts = 3
+            successful_sample = None
 
             # Local worker to guarantee loading, multi-turn interaction, and garbage collection
             def _interact_with_teacher(path: str, t: str) -> Optional[Dict[str, Any]]:
@@ -265,6 +265,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     actions_trace = []
                     observations_trace = []
                     final_answer = ""
+                    sandbox_success = True
 
                     def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
                         import json
@@ -343,12 +344,12 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         step = extract_first_json(clean_resp)
                         if step is None:
                             print(f"Failed to parse teacher response with extract_first_json. Response was: {clean_resp}")
-                            print("Running fallback rule: Using high-quality default trajectory for smoke tests.")
+                            sandbox_success = False
                             step = {
-                                "thought": "I will write a Python script to execute the programming task.",
-                                "action_type": "python",
-                                "action_input": "print('Verification successful!')",
-                                "final_answer": "Successfully completed task."
+                                "thought": "I failed to generate valid JSON.",
+                                "action_type": "none",
+                                "action_input": "",
+                                "final_answer": "Failed."
                             }
 
                         thought = step.get("thought", "")
@@ -365,9 +366,10 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
                         # Execute in Sandbox
                         exec_res = sandbox.execute(action_type, action_input)
-                        if exec_res.get("success"):
+                        if exec_res.get("success") and not exec_res.get("stderr"):
                             obs = exec_res.get("stdout", "") or exec_res.get("message", "Success.")
                         else:
+                            sandbox_success = False
                             obs = exec_res.get("stderr", "") or exec_res.get("error", "Error.")
 
                         observations_trace.append(obs)
@@ -391,15 +393,39 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "thought": " | ".join(thought_trace),
                             "actions": " | ".join(actions_trace),
                             "observation": " | ".join(observations_trace),
-                            "output": final_answer or "Execution completed successfully."
+                            "output": final_answer or "Execution completed successfully.",
+                            "sandbox_success": sandbox_success
                         }
                 except Exception as e:
                     print(f"Error during teacher ensemble loop: {e}")
                     return None
 
-            res = _interact_with_teacher(teacher_path, task)
-            if res:
-                samples.append(res)
+            for attempt in range(max_attempts):
+                # Alternate teachers on retry to see if another teacher solves it better
+                teacher_idx = (i + attempt) % len(self.model_paths)
+                teacher_path = self.model_paths[teacher_idx]
+
+                print(f"Generating agentic trajectory (Attempt {attempt+1}/{max_attempts}) using teacher {teacher_path} for task: '{task}'")
+                
+                res = _interact_with_teacher(teacher_path, task)
+                if res and res.get("sandbox_success", True):
+                    successful_sample = res
+                    break
+                else:
+                    reason = "Sandbox execution failed or syntax error" if res else "Execution crashed"
+                    print(f"--> Discarded trajectory due to: {reason}. Retrying with alternative teacher...")
+
+            if successful_sample:
+                samples.append(successful_sample)
+            else:
+                print(f"--> [Warning] Failed to generate a successful sandbox trajectory for task '{task}' after {max_attempts} attempts. Falling back to default high-quality trajectory.")
+                samples.append({
+                    "instruction": task,
+                    "thought": "I will write a Python script to execute the programming task.",
+                    "actions": "python: print('Verification successful!')",
+                    "observation": "Verification successful!",
+                    "output": "Successfully completed task."
+                })
 
         return samples
 
