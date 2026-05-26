@@ -6,7 +6,7 @@ BASE_DIR="models/mlx_self_training"
 if [ ! -d "$BASE_DIR" ]; then
     echo "No training directory found at $BASE_DIR."
     echo "Starting from scratch in full mode..."
-    ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full
+    ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full "$@"
     exit 0
 fi
 
@@ -16,9 +16,9 @@ LATEST_ITER=$(ls -d $BASE_DIR/iteration_* 2>/dev/null | sort -V | tail -n 1)
 if [ -z "$LATEST_ITER" ] || [ ! -f "$LATEST_ITER/adapters.safetensors" ]; then
     echo "No valid checkpoints (adapters.safetensors) found in $BASE_DIR."
     echo "Starting from scratch in full mode..."
-    ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full
+    ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full "$@"
 else
     echo "Found latest checkpoint: $LATEST_ITER"
     echo "Resuming Agentic Distillation in FULL PRODUCTION mode..."
-    ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full --resume "$LATEST_ITER"
+    ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full --resume "$LATEST_ITER" "$@"
 fi

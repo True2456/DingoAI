@@ -312,6 +312,12 @@ if __name__ == "__main__":
         default=None,
         help="Path to an existing adapter folder to resume training from (smoke/full/train-only)."
     )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="Number of iterations to run (overrides default of 1 for smoke, 3 for full)."
+    )
     # generate-only flags
     parser.add_argument(
         "--output",
@@ -375,9 +381,10 @@ if __name__ == "__main__":
 
     elif args.mode == "smoke":
         print("Configuring loop for SMOKE TEST...")
+        iters_count = args.iterations if args.iterations is not None else 1
         orchestrator = MLXSelfTrainingOrchestrator(
             base_model_path=base_model,
-            iterations=1,
+            iterations=iters_count,
             samples_per_iteration=1,
             generator_type="agentic",
             training_iters=15,
@@ -389,9 +396,10 @@ if __name__ == "__main__":
         print("Configuring loop for FULL DISTILLATION RUN...")
         # Rule of thumb for MoE 26B/4B: requires more steps to update routing weights.
         # 100 samples * 6 = 600 iters (3 epochs) to inject structure without overfitting.
+        iters_count = args.iterations if args.iterations is not None else 3
         orchestrator = MLXSelfTrainingOrchestrator(
             base_model_path=base_model,
-            iterations=3,
+            iterations=iters_count,
             samples_per_iteration=100,
             generator_type="agentic",
             training_iters=600,
