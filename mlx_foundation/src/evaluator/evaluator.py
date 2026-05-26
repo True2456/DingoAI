@@ -87,9 +87,8 @@ class MLXEvaluator:
         print(f"Evaluating agentic syntax on {total_eval} programming tasks...")
         
         for task in test_tasks:
-            # Match the exact training prompt format, wrapped in chat template
-            raw_prompt = f"Task: {task}\n"
-            formatted = self._apply_template(raw_prompt)
+            # Match the exact raw training prompt format
+            formatted = f"Task: {task}\n"
 
             response = mlx_lm.generate(
                 self.model,
