@@ -168,16 +168,35 @@ class MLXSelfTrainingOrchestrator:
 
             # 1. GENERATION
             print(f"Step 1: Generating synthetic data using {self.generator_type} generator...")
-            generator = self._get_generator(self.base_model_path, adapter_path=current_adapter_path, teacher_paths=teacher_paths)
-            synthetic_samples = generator.generate(num_samples=self.samples_per_iteration)
-            print(f"Generated {len(synthetic_samples)} samples.")
+
+            # Check if we already generated data for this iteration (e.g. from an aborted run).
+            # If so, load it instead of spending ~1hr regenerating with teacher models.
+            iteration_output_dir = os.path.join(self.output_dir, f"iteration_{i+1}")
+            cached_data_path = os.path.join("data", f"iteration_{i+1}_trajectories.jsonl")
+
+            if os.path.exists(cached_data_path):
+                print(f"Found cached trajectories at {cached_data_path} — loading instead of regenerating.")
+                with open(cached_data_path, "r") as f:
+                    synthetic_samples = [json.loads(line) for line in f if line.strip()]
+                print(f"Loaded {len(synthetic_samples)} cached samples.")
+            else:
+                generator = self._get_generator(self.base_model_path, adapter_path=current_adapter_path, teacher_paths=teacher_paths)
+                synthetic_samples = generator.generate(num_samples=self.samples_per_iteration)
+                print(f"Generated {len(synthetic_samples)} samples.")
+
+                # Persist so this batch is never regenerated again.
+                os.makedirs("data", exist_ok=True)
+                with open(cached_data_path, "w") as f:
+                    for sample in synthetic_samples:
+                        f.write(json.dumps(sample) + "\n")
+                print(f"Saved trajectories to {cached_data_path} for future reuse.")
+
 
             # 2. TRAINING
             print("Step 2: Training on synthetic data (LoRA)...")
-            iteration_output_dir = os.path.join(self.output_dir, f"iteration_{i+1}")
-            
+            # Note: iteration_output_dir is set in the generation block above.
             # If resuming and it's the first step of this run, we output to iteration_1 but read from current_adapter_path.
-            # If we already progressed to iteration_X, trainer reads from current_adapter_path.
+
             trainer = MLXTrainer(
                 model_path=self.base_model_path,
                 output_dir=iteration_output_dir,
