@@ -124,8 +124,10 @@ class DynamicTaskGenerator:
     def generate_tasks(self, num_tasks: int) -> List[str]:
         import mlx_lm
         import json
+        import gc
         
         print(f"Bootstrapping {num_tasks} dynamic programming tasks using teacher {self.model_path}...")
+        tasks = []
         try:
             model, tokenizer = mlx_lm.load(self.model_path)
             
@@ -142,23 +144,7 @@ class DynamicTaskGenerator:
                 "]"
             )
             
-            user_msg = f"Generate exactly {num_tasks} unique and diverse Python programming tasks as a JSON list of strings."
-            
-            if hasattr(tokenizer, "apply_chat_template"):
-                messages = [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg}
-                ]
-                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            else:
-                prompt = f"{system_msg}\n\n{user_msg}"
-                
-            response = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=1024, verbose=False)
-            clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
-            
-            # Robustly extract JSON array
             def extract_first_json_array(text: str) -> Optional[list]:
-                import json
                 brace_depth = 0
                 in_string = False
                 escape = False
@@ -192,24 +178,83 @@ class DynamicTaskGenerator:
                                     pass
                 return None
 
-            tasks = extract_first_json_array(clean_resp)
+            batch_size = 10
+            consecutive_failures = 0
+            while len(tasks) < num_tasks and consecutive_failures < 5:
+                curr_batch_size = min(batch_size, num_tasks - len(tasks))
+                user_msg = f"Generate exactly {curr_batch_size} unique and diverse Python programming tasks as a JSON list of strings."
+                if tasks:
+                    # Provide last 20 tasks to avoid duplicate topics
+                    negative_examples = "\n".join([f"- {t}" for t in tasks[-20:]])
+                    user_msg += f"\nDo NOT generate any tasks similar or duplicate to the following:\n{negative_examples}"
+                
+                if hasattr(tokenizer, "apply_chat_template"):
+                    messages = [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg}
+                    ]
+                    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                else:
+                    prompt = f"{system_msg}\n\n{user_msg}"
+                
+                response = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=1024, verbose=False)
+                clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
+                
+                batch_tasks = extract_first_json_array(clean_resp)
+                if batch_tasks and isinstance(batch_tasks, list):
+                    added_any = False
+                    for t in batch_tasks:
+                        if isinstance(t, str) and t.strip():
+                            t_clean = t.strip()
+                            if t_clean not in tasks:
+                                tasks.append(t_clean)
+                                added_any = True
+                    if added_any:
+                        print(f"  -> Generated {len(tasks)}/{num_tasks} unique tasks...")
+                        consecutive_failures = 0
+                    else:
+                        consecutive_failures += 1
+                else:
+                    consecutive_failures += 1
             
             # Explicit cleanup
             del model
             del tokenizer
-            import gc
             gc.collect()
             
-            if tasks and len(tasks) >= num_tasks:
-                return tasks[:num_tasks]
-            elif tasks:
-                return tasks
         except Exception as e:
             print(f"Error bootstrapping dynamic tasks: {e}")
             
+        if len(tasks) >= num_tasks:
+            return tasks[:num_tasks]
+        elif len(tasks) > 0:
+            print(f"Only bootstrapped {len(tasks)} tasks due to generation limits. Padding with fallbacks.")
+            # If we got some tasks, but not enough, let's pad them up to num_tasks
+            fallbacks = [
+                "Write a Python script that calculates the 10th Fibonacci number and print it.",
+                "Create a Python script that formats a list of numbers into a comma-separated string.",
+                "Write a Python script that asserts that the string 'mlx' is uppercase and runs successfully.",
+                "Write a Python script that counts the number of vowels in 'antigravity' and prints it.",
+                "Create a Python script that filters odd numbers from [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and prints the result.",
+                "Write a Python script that reverses the words in 'the quick brown fox jumps over the lazy dog' and prints it.",
+                "Create a Python script that calculates the factorial of 6 and prints the value.",
+                "Write a Python script that parses the domain name from 'https://github.com/True2456/MLX-DISTILL' and prints it.",
+                "Create a Python script that checks if the string 'racecar' is a palindrome and prints True or False.",
+                "Write a Python script that converts temperature 98.6 Fahrenheit to Celsius and prints the result rounded to one decimal place."
+            ]
+            while len(tasks) < num_tasks:
+                for f in fallbacks:
+                    if len(tasks) >= num_tasks:
+                        break
+                    if f not in tasks:
+                        tasks.append(f)
+                    else:
+                        tasks.append(f + f" (Variant {len(tasks)})")
+            return tasks
+        
         # Robust fallback
         print("Using robust fallback task list.")
-        return [
+        fallbacks = [
             "Write a Python script that calculates the 10th Fibonacci number and print it.",
             "Create a Python script that formats a list of numbers into a comma-separated string.",
             "Write a Python script that asserts that the string 'mlx' is uppercase and runs successfully.",
@@ -221,6 +266,13 @@ class DynamicTaskGenerator:
             "Create a Python script that checks if the string 'racecar' is a palindrome and prints True or False.",
             "Write a Python script that converts temperature 98.6 Fahrenheit to Celsius and prints the result rounded to one decimal place."
         ]
+        res = []
+        while len(res) < num_tasks:
+            for f in fallbacks:
+                if len(res) >= num_tasks:
+                    break
+                res.append(f if f not in res else f + f" (Variant {len(res)})")
+        return res
 
 class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
     """
