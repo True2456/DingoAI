@@ -261,6 +261,17 @@ class MLXSelfTrainingOrchestrator:
             # format at all — either the token format is wrong, or training is not working.
             # Perplexity is NOT used here: it rises naturally as the model specialises.
             conformity = syntax_results.get("token_conformity_rate", 0.0)
+
+            # Clean VRAM after evaluation is complete to prepare for the next iteration (generation)
+            del evaluator
+            import gc
+            gc.collect()
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except ImportError:
+                pass
+
             if conformity <= self.CONFORMITY_COLLAPSE_THRESHOLD:
                 print(f"\n[COLLAPSE GATE TRIGGERED] token_conformity_rate={conformity:.2f}.")
                 print(f"Model is not learning the agentic format after iteration {i+1}.")

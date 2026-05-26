@@ -102,6 +102,18 @@ class MultiTeacherMLXGenerator(BaseGenerator):
                         verbose=False
                     )
                     clean_response = response[len(p):].strip() if response.startswith(p) else response.strip()
+                    
+                    # Clean VRAM
+                    del model
+                    del tokenizer
+                    import gc
+                    gc.collect()
+                    try:
+                        import mlx.core as mx
+                        mx.metal.clear_cache()
+                    except ImportError:
+                        pass
+                        
                     return {"instruction": p, "output": clean_response}
                 except Exception as e:
                     print(f"Error with teacher {path}: {e}")
@@ -221,6 +233,11 @@ class DynamicTaskGenerator:
             del model
             del tokenizer
             gc.collect()
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except ImportError:
+                pass
             
         except Exception as e:
             print(f"Error bootstrapping dynamic tasks: {e}")
@@ -287,7 +304,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
     def generate(self, num_samples: int, task_descriptions: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         from sandbox.sandbox import SandboxExecutor
-        sandbox = SandboxExecutor(self.workspace_dir)
+        import tempfile
+        import os
+
+        # Ensure the shared sandbox parent directory exists
+        os.makedirs(self.workspace_dir, exist_ok=True)
 
         if task_descriptions is None:
             # Dynamically bootstrap unique programming tasks using the first teacher model in the list
@@ -303,12 +324,15 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
             max_attempts = 3
             successful_sample = None
 
-            # Local worker to guarantee loading, multi-turn interaction, and garbage collection
-            def _interact_with_teacher(path: str, t: str) -> Optional[Dict[str, Any]]:
+            # Local worker to guarantee loading, multi-turn interaction, and VRAM de-allocation
+            def _interact_with_teacher(path: str, t: str, sandbox_dir: str) -> Optional[Dict[str, Any]]:
                 try:
                     import mlx_lm
                     import json
                     model, tokenizer = mlx_lm.load(path)
+
+                    # Instantiate sandbox isolated exclusively to this jailed workspace
+                    sandbox = SandboxExecutor(sandbox_dir)
 
                     history = f"Task: {t}\n"
                     max_turns = 3
@@ -459,6 +483,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     del tokenizer
                     import gc
                     gc.collect()
+                    try:
+                        import mlx.core as mx
+                        mx.metal.clear_cache()
+                    except ImportError:
+                        pass
 
                     if thought_trace:
                         return {
@@ -482,13 +511,15 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
                 print(f"Generating agentic trajectory (Attempt {attempt+1}/{max_attempts}) using teacher {teacher_path} for task: '{task}'")
                 
-                res = _interact_with_teacher(teacher_path, task)
-                if res and res.get("sandbox_success", True):
-                    successful_sample = res
-                    break
-                else:
-                    reason = "Sandbox execution failed or syntax error" if res else "Execution crashed"
-                    print(f"--> Discarded trajectory due to: {reason}. Retrying with alternative teacher...")
+                # Jailed temporary directory workspace for this specific attempt to guarantee complete isolation
+                with tempfile.TemporaryDirectory(prefix=f"sandbox_rollout_{i}_{attempt}_", dir=self.workspace_dir) as tmp_workspace_dir:
+                    res = _interact_with_teacher(teacher_path, task, tmp_workspace_dir)
+                    if res and res.get("sandbox_success", True):
+                        successful_sample = res
+                        break
+                    else:
+                        reason = "Sandbox execution failed or syntax error" if res else "Execution crashed"
+                        print(f"--> Discarded trajectory due to: {reason}. Retrying with alternative teacher...")
 
             if successful_sample:
                 samples.append(successful_sample)

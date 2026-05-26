@@ -165,6 +165,17 @@ class MLXTrainer:
                 args=args
             )
 
+            # Clean VRAM to prevent memory leak before evaluation
+            del model
+            del tokenizer
+            import gc
+            gc.collect()
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except ImportError:
+                pass
+
         # Save the adapter configuration so that load_adapters works correctly
         config_path = os.path.join(self.output_dir, "adapter_config.json")
         with open(config_path, "w") as f:
