@@ -301,6 +301,9 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
     def __init__(self, model_paths: List[str], workspace_dir: str = "data/sandbox"):
         self.model_paths = model_paths
         self.workspace_dir = workspace_dir
+        # Cache loaded teacher models in RAM to avoid loading overhead.
+        # Since the user has 128GB of RAM, this is extremely efficient and safe.
+        self.model_cache = {}
 
     def generate(self, num_samples: int, task_descriptions: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         from sandbox.sandbox import SandboxExecutor
@@ -332,12 +335,17 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
             max_attempts = 3
             successful_sample = None
 
-            # Local worker to guarantee loading, multi-turn interaction, and VRAM de-allocation
+            # Local worker with unified RAM model caching
             def _interact_with_teacher(path: str, t: str, sandbox_dir: str) -> Optional[Dict[str, Any]]:
                 try:
                     import mlx_lm
                     import json
-                    model, tokenizer = mlx_lm.load(path)
+                    if path in self.model_cache:
+                        model, tokenizer = self.model_cache[path]
+                    else:
+                        print(f"Loading teacher model {path} into RAM cache...")
+                        model, tokenizer = mlx_lm.load(path)
+                        self.model_cache[path] = (model, tokenizer)
 
                     # Instantiate sandbox isolated exclusively to this jailed workspace
                     sandbox = SandboxExecutor(sandbox_dir)
@@ -490,16 +498,9 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             f"Observation: {obs}\n"
                         )
 
-                    # De-allocate model weights explicitly before returning
-                    del model
-                    del tokenizer
+                    # Keep models cached in RAM, only garbage collect local turn variables
                     import gc
                     gc.collect()
-                    try:
-                        import mlx.core as mx
-                        mx.metal.clear_cache()
-                    except ImportError:
-                        pass
 
                     if thought_trace:
                         return {
@@ -548,6 +549,17 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     "observation": "Verification successful!",
                     "output": "Successfully completed task."
                 })
+
+        # Clear the model cache completely before returning to free VRAM for training
+        print("Clearing teacher model cache to free VRAM for training...")
+        self.model_cache.clear()
+        import gc
+        gc.collect()
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()
+        except ImportError:
+            pass
 
         return samples
 
