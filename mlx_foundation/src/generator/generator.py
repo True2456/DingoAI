@@ -195,7 +195,7 @@ class DynamicTaskGenerator:
                                     pass
                 return None
 
-            batch_size = 10
+            batch_size = 50
             consecutive_failures = 0
             while len(tasks) < num_tasks and consecutive_failures < 5:
                 curr_batch_size = min(batch_size, num_tasks - len(tasks))
@@ -214,7 +214,7 @@ class DynamicTaskGenerator:
                 else:
                     prompt = f"{system_msg}\n\n{user_msg}"
                 
-                response = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=1024, verbose=False)
+                response = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=4096, verbose=False)
                 clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
                 
                 batch_tasks = extract_first_json_array(clean_resp)
