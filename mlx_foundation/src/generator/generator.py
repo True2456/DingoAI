@@ -110,8 +110,8 @@ class MultiTeacherMLXGenerator(BaseGenerator):
                     gc.collect()
                     try:
                         import mlx.core as mx
-                        mx.metal.clear_cache()
-                    except ImportError:
+                        mx.clear_cache()
+                    except AttributeError:
                         pass
                         
                     return {"instruction": p, "output": clean_response}
@@ -144,15 +144,18 @@ class DynamicTaskGenerator:
             model, tokenizer = mlx_lm.load(self.model_path)
             
             system_msg = (
-                "You are an expert curriculum designer. Brainstorm a list of unique and diverse Python programming tasks "
+                "You are an expert computer science curriculum designer. Brainstorm a list of unique, highly diverse Python programming tasks "
                 "that can be executed and verified in a simple local terminal sandbox.\n"
+                "Mix the difficulty and topics across the following categories: Graph algorithms (BFS/DFS, shortest path), Dynamic Programming, "
+                "Concurrency (threading/asyncio), File System data pipelines, System Design lite (LRU cache, rate limiters), and Edge-Case Heavy logic.\n"
                 "Each task must be a single sentence, concise, require computing a result dynamically, and "
                 "be structured such that the solution can be verified using self-contained assertions (e.g. comparing outputs to expected test cases).\n"
-                "Do NOT include any markdown code blocks or conversational text. Return ONLY a JSON list of strings.\n\n"
+                "The tasks should naturally require multiple steps of reasoning to solve. Do NOT include any markdown code blocks or conversational text. Return ONLY a JSON list of strings.\n\n"
                 "Example output:\n"
                 "[\n"
-                "  \"Write a Python script that sorts a list of tuples by their second element and prints it.\",\n"
-                "  \"Create a Python script that finds all prime numbers up to 50 and prints them.\"\n"
+                "  \"Write an asynchronous Python script that fetches data from 3 mock URLs concurrently and returns the fastest response.\",\n"
+                "  \"Implement a Python script for a Least Recently Used (LRU) cache class with a capacity of 3 and verify it with assertions.\",\n"
+                "  \"Create a Python script that uses dynamic programming to find the longest common subsequence of two DNA strings.\"\n"
                 "]"
             )
             
@@ -235,8 +238,8 @@ class DynamicTaskGenerator:
             gc.collect()
             try:
                 import mlx.core as mx
-                mx.metal.clear_cache()
-            except ImportError:
+                mx.clear_cache()
+            except AttributeError:
                 pass
             
         except Exception as e:
@@ -314,15 +317,22 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         os.makedirs(self.workspace_dir, exist_ok=True)
 
         if task_descriptions is None:
-            # Dynamically bootstrap unique programming tasks using a larger teacher model
-            # (preferring the coder model or the largest model in the list)
+            # Dynamically bootstrap unique programming tasks using a teacher model under 45 GB
+            # to prevent GPU OOM crashes at the start of the generation step.
             teacher_for_bootstrap = self.model_paths[0]
-            if len(self.model_paths) > 1:
-                for path in self.model_paths:
-                    path_lower = path.lower()
-                    if 'coder' in path_lower or '31b' in path_lower or '35b' in path_lower or '36b' in path_lower:
-                        teacher_for_bootstrap = path
-                        break
+            best_size = 0
+            for path in self.model_paths:
+                try:
+                    model_size = 0
+                    for root_dir, _, files_list in os.walk(path):
+                        for file_name in files_list:
+                            model_size += os.path.getsize(os.path.join(root_dir, file_name))
+                    if model_size <= 45 * 1024 * 1024 * 1024:
+                        if model_size > best_size:
+                            best_size = model_size
+                            teacher_for_bootstrap = path
+                except Exception:
+                    pass
             
             task_generator = DynamicTaskGenerator(teacher_for_bootstrap)
             task_descriptions = task_generator.generate_tasks(num_tasks=num_samples)
@@ -361,6 +371,16 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             model, tokenizer = mlx_lm.load(path)
                             self.model_cache[path] = (model, tokenizer)
                     else:
+                        if self.model_cache:
+                            print("Evicting cached teacher models from RAM before loading the large model...")
+                            self.model_cache.clear()
+                            import gc
+                            gc.collect()
+                            try:
+                                import mlx.core as mx
+                                mx.clear_cache()
+                            except AttributeError:
+                                pass
                         print(f"Loading large teacher model {path} dynamically (not cached to protect RAM)...")
                         model, tokenizer = mlx_lm.load(path)
 
@@ -368,7 +388,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     sandbox = SandboxExecutor(sandbox_dir)
 
                     history = f"Task: {t}\n"
-                    max_turns = 3
+                    max_turns = 5
                     
                     thought_trace = []
                     actions_trace = []
@@ -376,6 +396,8 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     final_answer = ""
                     sandbox_success = True
                     turns_array = []
+                    
+                    force_failure = random.random() < 0.3
 
                     def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
                         import json
@@ -422,8 +444,18 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "CRITICAL: Do NOT hardcode final results. Always write clean Python code to compute results. "
                             "You MUST include self-verifying test assertions (using 'assert') at the end of your script "
                             "to programmatically prove your solution is correct. If assertions fail, the script will crash, "
-                            "which is the correct behavior for incorrect logic.\n\n"
-                            "Format Example:\n"
+                            "which is the correct behavior for incorrect logic.\n"
+                        )
+                        
+                        if force_failure and turn == 0:
+                            system_msg += (
+                                "\n[TRAINING OVERRIDE]: For this first turn ONLY, you MUST intentionally write Python code that "
+                                "contains a realistic bug (e.g., an off-by-one error, syntax error, missing import, or incorrect logic). "
+                                "Do NOT solve the task correctly on this turn. You will fix it in the next turn based on the error trace.\n"
+                            )
+                        
+                        system_msg += (
+                            "\nFormat Example:\n"
                             "{\n"
                             "  \"thought\": \"I need to write a script to compute the solution and assert correctness.\",\n"
                             "  \"action_type\": \"python\",\n"
@@ -526,8 +558,8 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     gc.collect()
                     try:
                         import mlx.core as mx
-                        mx.metal.clear_cache()
-                    except ImportError:
+                        mx.clear_cache()
+                    except AttributeError:
                         pass
 
                     if thought_trace:
@@ -585,8 +617,8 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         gc.collect()
         try:
             import mlx.core as mx
-            mx.metal.clear_cache()
-        except ImportError:
+            mx.clear_cache()
+        except AttributeError:
             pass
 
         return samples
