@@ -150,7 +150,9 @@ class DynamicTaskGenerator:
                 "Concurrency (threading/asyncio), File System data pipelines, System Design lite (LRU cache, rate limiters), and Edge-Case Heavy logic.\n"
                 "Each task must be a single sentence, concise, require computing a result dynamically, and "
                 "be structured such that the solution can be verified using self-contained assertions (e.g. comparing outputs to expected test cases).\n"
-                "The tasks should naturally require multiple steps of reasoning to solve. Do NOT include any markdown code blocks or conversational text. Return ONLY a JSON list of strings.\n\n"
+                "The tasks should naturally require multiple steps of reasoning to solve. "
+                "Return ONLY a raw JSON list of strings. Do NOT wrap it in ```json blocks or output any conversational text. "
+                "You MUST start your entire response with '[' and end with ']'.\n\n"
                 "Example output:\n"
                 "[\n"
                 "  \"Write an asynchronous Python script that fetches data from 3 mock URLs concurrently and returns the fastest response.\",\n"
@@ -275,16 +277,12 @@ class DynamicTaskGenerator:
         # Robust fallback
         print("Using robust fallback task list.")
         fallbacks = [
-            "Write a Python script that calculates the 10th Fibonacci number and print it.",
-            "Create a Python script that formats a list of numbers into a comma-separated string.",
-            "Write a Python script that asserts that the string 'mlx' is uppercase and runs successfully.",
-            "Write a Python script that counts the number of vowels in 'antigravity' and prints it.",
-            "Create a Python script that filters odd numbers from [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and prints the result.",
-            "Write a Python script that reverses the words in 'the quick brown fox jumps over the lazy dog' and prints it.",
-            "Create a Python script that calculates the factorial of 6 and prints the value.",
-            "Write a Python script that parses the domain name from 'https://github.com/True2456/MLX-DISTILL' and prints it.",
-            "Create a Python script that checks if the string 'racecar' is a palindrome and prints True or False.",
-            "Write a Python script that converts temperature 98.6 Fahrenheit to Celsius and prints the result rounded to one decimal place."
+            "Write a Python script that uses dynamic programming to compute the Levenshtein distance between 'kitten' and 'sitting'.",
+            "Implement an asynchronous Python script that mocks fetching 3 URLs with random delays and returns the results as they complete.",
+            "Write a Python script that implements a simple LRU cache class with capacity 3, adds 4 items, and asserts the oldest is removed.",
+            "Create a Python script that uses Depth First Search (DFS) to find a path from node A to node E in a graph.",
+            "Write a Python script that creates a temporary directory, writes random data to 5 text files, and asserts they all exist.",
+            "Write a Python script that implements the Merge Sort algorithm to sort a list of 10 random integers.",
         ]
         res = []
         while len(res) < num_tasks:
@@ -452,6 +450,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                                 "\n[TRAINING OVERRIDE]: For this first turn ONLY, you MUST intentionally write Python code that "
                                 "contains a realistic bug (e.g., an off-by-one error, syntax error, missing import, or incorrect logic). "
                                 "Do NOT solve the task correctly on this turn. You will fix it in the next turn based on the error trace.\n"
+                                "CRITICAL: Even though you are writing buggy code, you MUST still output your response in the EXACT JSON dictionary format described below. Do not use plain text.\n"
                             )
                         
                         system_msg += (
