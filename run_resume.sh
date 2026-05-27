@@ -10,10 +10,16 @@ if [ ! -d "$BASE_DIR" ]; then
     exit 0
 fi
 
-# Find the highest iteration subdirectory
-LATEST_ITER=$(ls -d $BASE_DIR/iteration_* 2>/dev/null | sort -V | tail -n 1)
+# Find the highest iteration subdirectory that actually contains adapters.safetensors
+LATEST_ITER=""
+for dir in $(ls -d $BASE_DIR/iteration_* 2>/dev/null | sort -Vr); do
+    if [ -f "$dir/adapters.safetensors" ]; then
+        LATEST_ITER="$dir"
+        break
+    fi
+done
 
-if [ -z "$LATEST_ITER" ] || [ ! -f "$LATEST_ITER/adapters.safetensors" ]; then
+if [ -z "$LATEST_ITER" ]; then
     echo "No valid checkpoints (adapters.safetensors) found in $BASE_DIR."
     echo "Starting from scratch in full mode..."
     ./mlx_foundation/venv/bin/python -u mlx_foundation/src/main.py --mode full "$@"

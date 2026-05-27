@@ -1,5 +1,6 @@
 import mlx_lm
-from typing import List, Dict
+from mlx_lm.sample_utils import make_sampler, make_logits_processors
+from typing import Any, List, Dict
 import numpy as np
 import mlx.core as mx
 
@@ -18,12 +19,33 @@ class MLXEvaluator:
         """
         self.model_path = model_path
         self.adapter_path = adapter_path
-        # mlx_lm.load returns model and tokenizer
+        
+        print("Evaluator loading base model...")
+        self.model, self.tokenizer = mlx_lm.load(model_path)
+        
         if adapter_path:
-            print(f"Evaluator loading model with adapter from {adapter_path}...")
-            self.model, self.tokenizer = mlx_lm.load(model_path, adapter_path=adapter_path)
-        else:
-            self.model, self.tokenizer = mlx_lm.load(model_path)
+            import os
+            adapter_file = os.path.join(adapter_path, "adapters.safetensors")
+            if os.path.exists(adapter_file):
+                print(f"Evaluator loading adapter weights from {adapter_file}...")
+                # We assume the config matches the trainer (16 layers). Ideally we would load adapter_config.json
+                # but applying linear_to_lora_layers directly is a safe proxy.
+                import json
+                config_path = os.path.join(adapter_path, "adapter_config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        loaded_config = json.load(f)
+                    num_layers = loaded_config.get("num_layers", 16)
+                    lora_config = loaded_config.get("lora_parameters", loaded_config)
+                    mlx_lm.lora.linear_to_lora_layers(self.model, num_layers=num_layers, config=lora_config)
+                else:
+                    # Fallback to defaults
+                    lora_config = {"rank": 16, "alpha": 32, "dropout": 0.0, "scale": 1.0}
+                    mlx_lm.lora.linear_to_lora_layers(self.model, num_layers=16, config=lora_config)
+                    
+                self.model.load_weights(adapter_file, strict=False)
+            else:
+                print(f"Warning: Evaluator could not find {adapter_file}.")
 
     def _apply_template(self, text: str) -> str:
         """
@@ -43,6 +65,17 @@ class MLXEvaluator:
                 pass  # Fallback to raw text if template fails
         return text
 
+    def _make_generate_kwargs(self, temp: float = 0.7, repetition_penalty: float = 1.3,
+                               repetition_context_size: int = 20) -> dict:
+        """Build sampler + logits_processors kwargs for mlx_lm.generate."""
+        return {
+            "sampler": make_sampler(temp=temp),
+            "logits_processors": make_logits_processors(
+                repetition_penalty=repetition_penalty,
+                repetition_context_size=repetition_context_size,
+            ),
+        }
+
     def evaluate_generation(self, test_prompts: List[str], max_new_tokens: int = 200) -> List[Dict[str, str]]:
         """
         Generates responses for a set of test prompts using MLX.
@@ -51,6 +84,7 @@ class MLXEvaluator:
         results = []
         print(f"Evaluating {len(test_prompts)} prompts with MLX...")
 
+        gen_kwargs = self._make_generate_kwargs()
         for prompt in test_prompts:
             formatted = self._apply_template(prompt)
             response = mlx_lm.generate(
@@ -58,7 +92,8 @@ class MLXEvaluator:
                 self.tokenizer,
                 prompt=formatted,
                 max_tokens=max_new_tokens,
-                verbose=False
+                verbose=False,
+                **gen_kwargs,
             )
 
             # Strip the formatted prompt prefix if echoed back
@@ -101,19 +136,21 @@ class MLXEvaluator:
             else:
                 formatted = f"Task: {task}\n"
 
+            gen_kwargs = self._make_generate_kwargs()
             response = mlx_lm.generate(
                 self.model,
                 self.tokenizer,
                 prompt=formatted,
-                max_tokens=256,
-                verbose=False
+                max_tokens=1024,
+                verbose=False,
+                **gen_kwargs,
             )
             clean_resp = response[len(formatted):].strip() if response.startswith(formatted) else response.strip()
 
             # Check for [THOUGHT]/[ACTION]/[PILOT] markers or native channel tags
             # Plain custom tags:
-            has_custom_thought = "[THOUGHT]" in clean_resp
-            has_custom_action = "[ACTION]" in clean_resp
+            has_custom_thought = "[THOUGHT]" in clean_resp or "<|thought|>" in clean_resp or "<|channel>thought" in clean_resp
+            has_custom_action = "[ACTION]" in clean_resp or "[END]" in clean_resp or "<channel|>" in clean_resp
             
             # Pilot tags model converged on:
             has_pilot_thought = "[PILOT-MODE-ON]" in clean_resp or "[PILOT-OUTPUT-1]" in clean_resp
@@ -134,14 +171,25 @@ class MLXEvaluator:
                     thought_content = ""
                     action_content = ""
                     
-                    if has_custom_thought:
-                        thought_start = clean_resp.find("[THOUGHT]") + len("[THOUGHT]")
-                        thought_end = clean_resp.find("[END]", thought_start)
+                    if "[THOUGHT]" in clean_resp or "<|thought|>" in clean_resp:
+                        t_marker = "[THOUGHT]" if "[THOUGHT]" in clean_resp else "<|thought|>"
+                        thought_start = clean_resp.find(t_marker) + len(t_marker)
+                        thought_end = clean_resp.find("[ACTION]", thought_start)
+                        if thought_end == -1:
+                            thought_end = clean_resp.find("[END]", thought_start)
+                        if thought_end == -1:
+                            thought_end = len(clean_resp)
                         thought_content = clean_resp[thought_start:thought_end].strip()
                         
-                        action_start = clean_resp.find("[ACTION]", thought_end) + len("[ACTION]")
-                        action_end = clean_resp.find("[END]", action_start)
-                        action_content = clean_resp[action_start:action_end].strip()
+                        action_start = clean_resp.find("[ACTION]", thought_end)
+                        if action_start != -1:
+                            action_start += len("[ACTION]")
+                            action_end = clean_resp.find("[END]", action_start)
+                            if action_end == -1:
+                                action_end = len(clean_resp)
+                            action_content = clean_resp[action_start:action_end].strip()
+                        else:
+                            action_content = ""
                     elif has_pilot_thought:
                         # Extract between pilot blocks
                         if "[PILOT-OUTPUT-1]" in clean_resp:

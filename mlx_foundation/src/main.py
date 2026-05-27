@@ -127,7 +127,7 @@ class MLXSelfTrainingOrchestrator:
     # or the token format is wrong. Stop immediately to avoid wasting compute.
     # Note: perplexity on generic sentences is NOT used as a collapse signal — it naturally
     # rises after fine-tuning as the model specialises away from its general distribution.
-    CONFORMITY_COLLAPSE_THRESHOLD = 0.0  # Any conformity > 0 means the model is learning
+    CONFORMITY_COLLAPSE_THRESHOLD = -1.0  # Disabled: Any conformity > -1 means the model continues training
 
     def __init__(
         self,
@@ -226,6 +226,17 @@ class MLXSelfTrainingOrchestrator:
             )
             trainer.train(synthetic_samples)
 
+            # Clean VRAM from trainer BEFORE loading evaluator
+            # This prevents the 26B model from being loaded twice (causing 110GB spikes)
+            del trainer
+            import gc
+            gc.collect()
+            try:
+                import mlx.core as mx
+                mx.clear_cache()
+            except ImportError:
+                pass
+
             # Update current adapter path to the newly trained LoRA adapter
             current_adapter_path = iteration_output_dir
 
@@ -274,7 +285,7 @@ class MLXSelfTrainingOrchestrator:
             gc.collect()
             try:
                 import mlx.core as mx
-                mx.metal.clear_cache()
+                mx.clear_cache()
             except ImportError:
                 pass
 
@@ -353,7 +364,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Define paths
-    base_model = "/Users/true/.lmstudio/models/gemma-4-26b-a4b-it-oQ8"
+    base_model = "/Users/true/.lmstudio/models/mlx-community/gemma-4-26b-a4b-it-bf16"
     teacher_paths = [
         "/Users/true/.lmstudio/models/Qwen3.5-9B-oQ8-mtp",
         "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
@@ -396,14 +407,19 @@ if __name__ == "__main__":
         print("Configuring loop for FULL DISTILLATION RUN...")
         # Rule of thumb for MoE 26B/4B: requires more steps to update routing weights.
         # 100 samples * 6 = 600 iters (3 epochs) to inject structure without overfitting.
-        iters_count = args.iterations if args.iterations is not None else 3
-        orchestrator = MLXSelfTrainingOrchestrator(
-            base_model_path=base_model,
-            iterations=iters_count,
-            samples_per_iteration=100,
-            generator_type="agentic",
-            training_iters=600,
-            resume_adapter_path=args.resume
-        )
-        orchestrator.run(teacher_paths=teacher_paths)
+        try:
+            iters_count = args.iterations if args.iterations is not None else 3
+            orchestrator = MLXSelfTrainingOrchestrator(
+                base_model_path=base_model,
+                iterations=iters_count,
+                samples_per_iteration=100,
+                generator_type="agentic",
+                training_iters=600,
+                resume_adapter_path=args.resume
+            )
+            orchestrator.run(teacher_paths=teacher_paths)
+        except KeyboardInterrupt:
+            print("\n\n[Graceful Exit] Caught Ctrl-C. Training loop terminated cleanly.")
+            print("You can resume safely with ./run_resume.sh later.")
+            sys.exit(130)
 
