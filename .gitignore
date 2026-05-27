@@ -9,6 +9,7 @@ ENV/
 # Project specific
 models/
 data/
+reports/
 *.log
 
 # OS
