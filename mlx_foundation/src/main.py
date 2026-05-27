@@ -11,7 +11,12 @@ from trainer.trainer import MLXTrainer
 from evaluator.evaluator import MLXEvaluator
 
 
-def run_generate_only(teacher_paths: List[str], num_samples: int, output_path: str):
+def run_generate_only(
+    teacher_paths: List[str],
+    num_samples: int,
+    output_path: str,
+    bootstrap_model_path: Optional[str] = None,
+):
     """
     Standalone generation mode — runs on the second machine (e.g. M3 Max 64GB).
     Loads only the teacher models, generates agentic coding trajectories, and saves
@@ -22,10 +27,15 @@ def run_generate_only(teacher_paths: List[str], num_samples: int, output_path: s
     """
     print(f"=== GENERATE-ONLY MODE ===")
     print(f"Generating {num_samples} agentic trajectories using teachers: {teacher_paths}")
+    if bootstrap_model_path:
+        print(f"Task/question generator override: {bootstrap_model_path}")
     print(f"Output will be saved to: {output_path}")
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    generator = EnsembleAgenticTrajectoryGenerator(model_paths=teacher_paths)
+    generator = EnsembleAgenticTrajectoryGenerator(
+        model_paths=teacher_paths,
+        bootstrap_model_path=bootstrap_model_path,
+    )
     # checkpoint_path enables incremental writing + crash recovery
     samples = generator.generate(num_samples=num_samples, checkpoint_path=output_path)
 
@@ -132,7 +142,8 @@ class MLXSelfTrainingOrchestrator:
         output_dir: str = "models/mlx_self_training",
         generator_type: str = "agentic", # options: "mlx", "multi_teacher", "agentic"
         training_iters: int = 15,
-        resume_adapter_path: Optional[str] = None
+        resume_adapter_path: Optional[str] = None,
+        bootstrap_model_path: Optional[str] = None
     ):
         self.base_model_path = base_model_path
         self.iterations = iterations
@@ -141,6 +152,7 @@ class MLXSelfTrainingOrchestrator:
         self.generator_type = generator_type
         self.training_iters = training_iters
         self.resume_adapter_path = resume_adapter_path
+        self.bootstrap_model_path = bootstrap_model_path
 
     def _get_generator(self, model_path: str, adapter_path: Optional[str] = None, teacher_paths: Optional[List[str]] = None):
         if self.generator_type == "multi_teacher":
@@ -149,7 +161,10 @@ class MLXSelfTrainingOrchestrator:
         elif self.generator_type == "agentic":
             # For agentic ensemble training, we use the teacher paths (Qwen and Gemma 31B) to generate traces
             paths = teacher_paths if teacher_paths else [model_path]
-            return EnsembleAgenticTrajectoryGenerator(model_paths=paths)
+            return EnsembleAgenticTrajectoryGenerator(
+                model_paths=paths,
+                bootstrap_model_path=self.bootstrap_model_path,
+            )
         else:
             return MLXGenerator(model_path=model_path, adapter_path=adapter_path)
 
@@ -321,6 +336,17 @@ if __name__ == "__main__":
         default=None,
         help="Number of iterations to run (overrides default of 1 for smoke, 3 for full)."
     )
+    bootstrap_group = parser.add_mutually_exclusive_group()
+    bootstrap_group.add_argument(
+        "--qwen",
+        action="store_true",
+        help="Use the Qwen Coder Next teacher to generate task/questions."
+    )
+    bootstrap_group.add_argument(
+        "--gemma",
+        action="store_true",
+        help="Use the Gemma 31B teacher to generate task/questions."
+    )
     # generate-only flags
     parser.add_argument(
         "--output",
@@ -363,11 +389,18 @@ if __name__ == "__main__":
         "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
     ]
 
+    bootstrap_model = None
+    if args.qwen:
+        bootstrap_model = teacher_paths[1]
+    elif args.gemma:
+        bootstrap_model = teacher_paths[2]
+
     if args.mode == "generate-only":
         run_generate_only(
             teacher_paths=teacher_paths,
             num_samples=args.samples,
             output_path=args.output,
+            bootstrap_model_path=bootstrap_model,
         )
 
     elif args.mode == "train-only":
@@ -391,7 +424,8 @@ if __name__ == "__main__":
             samples_per_iteration=1,
             generator_type="agentic",
             training_iters=15,
-            resume_adapter_path=args.resume
+            resume_adapter_path=args.resume,
+            bootstrap_model_path=bootstrap_model
         )
         orchestrator.run(teacher_paths=teacher_paths)
 
@@ -407,7 +441,8 @@ if __name__ == "__main__":
                 samples_per_iteration=100,
                 generator_type="agentic",
                 training_iters=600,
-                resume_adapter_path=args.resume
+                resume_adapter_path=args.resume,
+                bootstrap_model_path=bootstrap_model
             )
             orchestrator.run(teacher_paths=teacher_paths)
         except KeyboardInterrupt:

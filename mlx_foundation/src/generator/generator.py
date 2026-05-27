@@ -325,9 +325,15 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
     and constructs a real trace history dynamically.
     """
     
-    def __init__(self, model_paths: List[str], workspace_dir: str = "data/sandbox"):
+    def __init__(
+        self,
+        model_paths: List[str],
+        workspace_dir: str = "data/sandbox",
+        bootstrap_model_path: Optional[str] = None,
+    ):
         self.model_paths = model_paths
         self.workspace_dir = workspace_dir
+        self.bootstrap_model_path = bootstrap_model_path
         # Cache loaded teacher models in RAM to avoid loading overhead.
         # Since the user has 128GB of RAM, this is extremely efficient and safe.
         self.model_cache = {}
@@ -357,20 +363,24 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         if task_descriptions is None:
             # Dynamically bootstrap unique programming tasks using a teacher model under 45 GB
             # to prevent GPU OOM crashes at the start of the generation step.
-            teacher_for_bootstrap = self.model_paths[0]
-            best_size = 0
-            for path in self.model_paths:
-                try:
-                    model_size = 0
-                    for root_dir, _, files_list in os.walk(path):
-                        for file_name in files_list:
-                            model_size += os.path.getsize(os.path.join(root_dir, file_name))
-                    if model_size <= 45 * 1024 * 1024 * 1024:
-                        if model_size > best_size:
-                            best_size = model_size
-                            teacher_for_bootstrap = path
-                except Exception:
-                    pass
+            if self.bootstrap_model_path:
+                teacher_for_bootstrap = self.bootstrap_model_path
+                print(f"Using requested bootstrap task generator: {teacher_for_bootstrap}")
+            else:
+                teacher_for_bootstrap = self.model_paths[0]
+                best_size = 0
+                for path in self.model_paths:
+                    try:
+                        model_size = 0
+                        for root_dir, _, files_list in os.walk(path):
+                            for file_name in files_list:
+                                model_size += os.path.getsize(os.path.join(root_dir, file_name))
+                        if model_size <= 45 * 1024 * 1024 * 1024:
+                            if model_size > best_size:
+                                best_size = model_size
+                                teacher_for_bootstrap = path
+                    except Exception:
+                        pass
             
             task_generator = DynamicTaskGenerator(teacher_for_bootstrap)
             task_descriptions = task_generator.generate_tasks(num_tasks=num_samples)
