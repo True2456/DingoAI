@@ -24,15 +24,10 @@ def run_generate_only(teacher_paths: List[str], num_samples: int, output_path: s
     print(f"Generating {num_samples} agentic trajectories using teachers: {teacher_paths}")
     print(f"Output will be saved to: {output_path}")
 
-    generator = EnsembleAgenticTrajectoryGenerator(model_paths=teacher_paths)
-    samples = generator.generate(num_samples=num_samples)
-
-    # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-
-    with open(output_path, "w") as f:
-        for sample in samples:
-            f.write(json.dumps(sample) + "\n")
+    generator = EnsembleAgenticTrajectoryGenerator(model_paths=teacher_paths)
+    # checkpoint_path enables incremental writing + crash recovery
+    samples = generator.generate(num_samples=num_samples, checkpoint_path=output_path)
 
     # Auto-export commercial dataset format
     try:
@@ -194,15 +189,12 @@ class MLXSelfTrainingOrchestrator:
                 print(f"Loaded {len(synthetic_samples)} cached samples.")
             else:
                 generator = self._get_generator(self.base_model_path, adapter_path=current_adapter_path, teacher_paths=teacher_paths)
-                synthetic_samples = generator.generate(num_samples=self.samples_per_iteration)
-                print(f"Generated {len(synthetic_samples)} samples.")
-
-                # Persist so this batch is never regenerated again.
                 os.makedirs("data", exist_ok=True)
-                with open(cached_data_path, "w") as f:
-                    for sample in synthetic_samples:
-                        f.write(json.dumps(sample) + "\n")
-                print(f"Saved trajectories to {cached_data_path} for future reuse.")
+                # Pass cached_data_path as checkpoint so each sample is written immediately.
+                # If the run crashes mid-generation, resume will pick up where it left off.
+                synthetic_samples = generator.generate(num_samples=self.samples_per_iteration, checkpoint_path=cached_data_path)
+                print(f"Generated {len(synthetic_samples)} samples.")
+                print(f"Trajectories written incrementally to {cached_data_path}.")
 
                 # Auto-export commercial dataset format
                 try:

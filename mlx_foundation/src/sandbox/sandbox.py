@@ -38,6 +38,14 @@ class SandboxExecutor:
                 "error": f"Unsupported sandboxed action type: {action_type}"
             }
 
+    def _safe_path(self, relative_path: str) -> str:
+        """Resolve a sandbox-relative path without allowing escapes."""
+        cleaned = relative_path.strip().lstrip("/\\")
+        full_path = os.path.abspath(os.path.join(self.workspace_dir, cleaned))
+        if not full_path.startswith(self.workspace_dir + os.sep) and full_path != self.workspace_dir:
+            raise ValueError(f"Path escapes sandbox: {relative_path}")
+        return full_path
+
     def _run_python(self, code: str) -> Dict[str, Any]:
         # Write inline code to a temporary file in the sandbox workspace
         with tempfile.NamedTemporaryFile(suffix=".py", dir=self.workspace_dir, delete=False, mode="w") as tmp:
@@ -81,13 +89,14 @@ class SandboxExecutor:
         try:
             # Format: 'filename:content'
             if ":" not in content_str:
-                return {"success": False, "error": "Invalid write format. Use 'filename:content'"}
+                return {"success": False, "error": "Invalid write format. Use 'relative/path:content'"}
             
             parts = content_str.split(":", 1)
-            filename = os.path.basename(parts[0].strip())
+            filename = parts[0].strip()
             content = parts[1]
 
-            file_path = os.path.join(self.workspace_dir, filename)
+            file_path = self._safe_path(filename)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, "w") as f:
                 f.write(content)
             return {"success": True, "message": f"Successfully wrote {len(content)} chars to {filename}"}
@@ -96,8 +105,8 @@ class SandboxExecutor:
 
     def _read_file(self, filename: str) -> Dict[str, Any]:
         try:
-            filename = os.path.basename(filename.strip())
-            file_path = os.path.join(self.workspace_dir, filename)
+            filename = filename.strip()
+            file_path = self._safe_path(filename)
             if not os.path.exists(file_path):
                 return {"success": False, "error": f"File '{filename}' not found."}
             
@@ -109,7 +118,11 @@ class SandboxExecutor:
 
     def _list_dir(self) -> Dict[str, Any]:
         try:
-            files = os.listdir(self.workspace_dir)
+            files = []
+            for root, _, filenames in os.walk(self.workspace_dir):
+                for filename in filenames:
+                    full_path = os.path.join(root, filename)
+                    files.append(os.path.relpath(full_path, self.workspace_dir))
             return {"success": True, "files": files}
         except Exception as e:
             return {"success": False, "error": str(e)}
