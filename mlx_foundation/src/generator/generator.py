@@ -1,5 +1,6 @@
 import random
 import hashlib
+import os
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import mlx_lm
@@ -131,8 +132,9 @@ class DynamicTaskGenerator:
     [DARK HORSE] Self-Instruct Curriculum Creator.
     Loads a teacher model to brainstorm diverse, sandboxed Python programming tasks dynamically.
     """
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, system_prompt: Optional[str] = None):
         self.model_path = model_path
+        self.system_prompt = system_prompt
 
     def generate_tasks(self, num_tasks: int) -> List[str]:
         import mlx_lm
@@ -176,6 +178,8 @@ class DynamicTaskGenerator:
                 "  \"Create src/security.py with an unsafe path join helper, write tests/test_security.py that demonstrates a path traversal bug, then patch the helper and rerun the tests successfully.\"\n"
                 "]"
             )
+            if self.system_prompt:
+                system_msg = self.system_prompt
             
             def extract_first_json_array(text: str) -> Optional[list]:
                 brace_depth = 0
@@ -331,13 +335,29 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         model_paths: List[str],
         workspace_dir: str = "data/sandbox",
         bootstrap_model_path: Optional[str] = None,
+        task_system_prompt: Optional[str] = None,
+        teacher_attempt_order: Optional[List[int]] = None,
+        memory_settings: Optional[Dict[str, Any]] = None,
     ):
         self.model_paths = model_paths
         self.workspace_dir = workspace_dir
         self.bootstrap_model_path = bootstrap_model_path
-        # Cache loaded teacher models in RAM to avoid loading overhead.
-        # Since the user has 128GB of RAM, this is extremely efficient and safe.
+        self.task_system_prompt = task_system_prompt
+        self.teacher_attempt_order = teacher_attempt_order or list(range(len(model_paths)))
+        self.memory_settings = memory_settings or {}
+        self.teacher_cache_limit_gb = float(self.memory_settings.get("teacher_cache_limit_gb", 45))
+        self.bootstrap_max_model_gb = float(self.memory_settings.get("bootstrap_max_model_gb", self.teacher_cache_limit_gb))
+        self.cache_teachers = bool(self.memory_settings.get("cache_teachers", self.teacher_cache_limit_gb > 0))
+        # Cache loaded teacher models in RAM when the selected memory profile allows it.
         self.model_cache = {}
+
+    @staticmethod
+    def _model_size_gb(path: str) -> float:
+        model_size = 0
+        for root_dir, _, files_list in os.walk(path):
+            for file_name in files_list:
+                model_size += os.path.getsize(os.path.join(root_dir, file_name))
+        return model_size / (1024 ** 3)
 
     def generate(self, num_samples: int, task_descriptions: Optional[List[str]] = None, checkpoint_path: Optional[str] = None) -> List[Dict[str, Any]]:
         from sandbox.sandbox import SandboxExecutor
@@ -377,18 +397,18 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                 best_size = 0
                 for path in self.model_paths:
                     try:
-                        model_size = 0
-                        for root_dir, _, files_list in os.walk(path):
-                            for file_name in files_list:
-                                model_size += os.path.getsize(os.path.join(root_dir, file_name))
-                        if model_size <= 45 * 1024 * 1024 * 1024:
-                            if model_size > best_size:
-                                best_size = model_size
+                        model_size_gb = self._model_size_gb(path)
+                        if model_size_gb <= self.bootstrap_max_model_gb:
+                            if model_size_gb > best_size:
+                                best_size = model_size_gb
                                 teacher_for_bootstrap = path
                     except Exception:
                         pass
             
-            task_generator = DynamicTaskGenerator(teacher_for_bootstrap)
+            task_generator = DynamicTaskGenerator(
+                teacher_for_bootstrap,
+                system_prompt=self.task_system_prompt,
+            )
             task_descriptions = task_generator.generate_tasks(num_tasks=num_samples)
 
         for i in range(num_samples):
@@ -409,15 +429,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                 try:
                     import mlx_lm
                     import json
-                    # Determine if we should cache this model based on size (threshold: 45 GB)
-                    # This prevents caching the massive Qwen Coder Next (79GB) while caching smaller ones.
-                    should_cache = True
+                    # Determine if we should cache this model based on the selected memory profile.
+                    should_cache = self.cache_teachers
                     try:
-                        model_size = 0
-                        for root_dir, _, files_list in os.walk(path):
-                            for file_name in files_list:
-                                model_size += os.path.getsize(os.path.join(root_dir, file_name))
-                        if model_size > 45 * 1024 * 1024 * 1024:
+                        model_size_gb = self._model_size_gb(path)
+                        if model_size_gb > self.teacher_cache_limit_gb:
                             should_cache = False
                     except Exception:
                         pass
@@ -716,14 +732,14 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     print(f"Error during teacher ensemble loop: {e}")
                     return None
 
+            ordered_teachers = [
+                self.model_paths[idx]
+                for idx in self.teacher_attempt_order
+                if 0 <= idx < len(self.model_paths)
+            ] or self.model_paths
+
             for attempt in range(max_attempts):
-                # Attempt 0 always uses the first teacher (the 9B model).
-                # Subsequent attempts alternate among the other teachers.
-                if attempt == 0:
-                    teacher_path = self.model_paths[0]
-                else:
-                    other_teachers = self.model_paths[1:] if len(self.model_paths) > 1 else self.model_paths
-                    teacher_path = other_teachers[(i + attempt - 1) % len(other_teachers)]
+                teacher_path = ordered_teachers[attempt % len(ordered_teachers)]
 
                 print(f"Generating agentic trajectory (Attempt {attempt+1}/{max_attempts}) using teacher {teacher_path} for task: '{task}'")
                 

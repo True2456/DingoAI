@@ -11,11 +11,88 @@ from trainer.trainer import MLXTrainer
 from evaluator.evaluator import MLXEvaluator
 
 
+DEFAULT_CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../config/default_config.json"))
+
+
+def _deep_update(base: dict, updates: dict) -> dict:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def load_run_config(config_path: Optional[str] = None) -> dict:
+    config = {
+        "models": {
+            "student": "/Users/true/.lmstudio/models/mlx-community/gemma-4-26b-a4b-it-bf16",
+            "teachers": [
+                "/Users/true/.lmstudio/models/Qwen3.5-9B-oQ8-mtp",
+                "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
+                "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
+            ],
+        },
+        "generation": {
+            "bootstrap_teacher_index": None,
+            "teacher_attempt_order": [0, 1, 2],
+            "task_system_prompt": "",
+        },
+        "hardware": {
+            "memory_profile": "high",
+            "system_ram_gb": 128,
+            "teacher_cache_limit_gb": 45,
+            "bootstrap_max_model_gb": 45,
+            "cache_teachers": True,
+        },
+        "training": {
+            "default_train_iters": 200,
+            "default_train_output": "models/mlx_self_training/train_only",
+        }
+    }
+    path = config_path or DEFAULT_CONFIG_PATH
+    if path and os.path.exists(path):
+        with open(path, "r") as f:
+            _deep_update(config, json.load(f))
+    return config
+
+
+def ensure_can_write_output(path: str, overwrite: bool, kind: str) -> None:
+    if overwrite:
+        return
+    if os.path.exists(path):
+        print(f"ERROR: Refusing to overwrite existing {kind}: {path}")
+        print("Use --overwrite or choose a new output path.")
+        sys.exit(1)
+
+
+def memory_settings_from_config(run_config: dict, profile_override: Optional[str] = None) -> dict:
+    profile_defaults = {
+        "low": {"teacher_cache_limit_gb": 0, "bootstrap_max_model_gb": 20, "cache_teachers": False},
+        "medium": {"teacher_cache_limit_gb": 20, "bootstrap_max_model_gb": 30, "cache_teachers": True},
+        "high": {"teacher_cache_limit_gb": 45, "bootstrap_max_model_gb": 45, "cache_teachers": True},
+        "max": {"teacher_cache_limit_gb": 80, "bootstrap_max_model_gb": 80, "cache_teachers": True},
+    }
+    hardware = run_config.get("hardware", {})
+    profile = profile_override or hardware.get("memory_profile", "high")
+    settings = dict(profile_defaults.get(profile, profile_defaults["high"]))
+    if profile_override is None:
+        for key in ("teacher_cache_limit_gb", "bootstrap_max_model_gb", "cache_teachers"):
+            if key in hardware:
+                settings[key] = hardware[key]
+    settings["memory_profile"] = profile
+    return settings
+
+
 def run_generate_only(
     teacher_paths: List[str],
     num_samples: int,
     output_path: str,
     bootstrap_model_path: Optional[str] = None,
+    task_system_prompt: Optional[str] = None,
+    teacher_attempt_order: Optional[List[int]] = None,
+    overwrite: bool = False,
+    memory_settings: Optional[dict] = None,
 ):
     """
     Standalone generation mode — runs on the second machine (e.g. M3 Max 64GB).
@@ -29,12 +106,24 @@ def run_generate_only(
     print(f"Generating {num_samples} agentic trajectories using teachers: {teacher_paths}")
     if bootstrap_model_path:
         print(f"Task/question generator override: {bootstrap_model_path}")
+    if memory_settings:
+        print(
+            "Memory profile: "
+            f"{memory_settings.get('memory_profile', 'custom')} "
+            f"(cache_teachers={memory_settings.get('cache_teachers')}, "
+            f"teacher_cache_limit_gb={memory_settings.get('teacher_cache_limit_gb')}, "
+            f"bootstrap_max_model_gb={memory_settings.get('bootstrap_max_model_gb')})"
+        )
     print(f"Output will be saved to: {output_path}")
 
+    ensure_can_write_output(output_path, overwrite, "trajectory file")
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     generator = EnsembleAgenticTrajectoryGenerator(
         model_paths=teacher_paths,
         bootstrap_model_path=bootstrap_model_path,
+        task_system_prompt=task_system_prompt,
+        teacher_attempt_order=teacher_attempt_order,
+        memory_settings=memory_settings,
     )
     # checkpoint_path enables incremental writing + crash recovery
     samples = generator.generate(num_samples=num_samples, checkpoint_path=output_path)
@@ -57,6 +146,7 @@ def run_train_only(
     output_dir: str,
     training_iters: int,
     resume_adapter_path: Optional[str],
+    overwrite: bool = False,
 ):
     """
     Standalone training mode — reads a pre-generated JSONL file and runs LoRA
@@ -83,6 +173,7 @@ def run_train_only(
         print(f"WARNING: iters/samples ratio is {ratio:.1f} (>{3.0}). Risk of memorization.")
         print(f"Consider reducing --train-iters or generating more samples.")
 
+    ensure_can_write_output(output_dir, overwrite, "adapter directory")
     os.makedirs(output_dir, exist_ok=True)
 
     trainer = MLXTrainer(
@@ -143,7 +234,10 @@ class MLXSelfTrainingOrchestrator:
         generator_type: str = "agentic", # options: "mlx", "multi_teacher", "agentic"
         training_iters: int = 15,
         resume_adapter_path: Optional[str] = None,
-        bootstrap_model_path: Optional[str] = None
+        bootstrap_model_path: Optional[str] = None,
+        task_system_prompt: Optional[str] = None,
+        teacher_attempt_order: Optional[List[int]] = None,
+        memory_settings: Optional[dict] = None,
     ):
         self.base_model_path = base_model_path
         self.iterations = iterations
@@ -153,6 +247,9 @@ class MLXSelfTrainingOrchestrator:
         self.training_iters = training_iters
         self.resume_adapter_path = resume_adapter_path
         self.bootstrap_model_path = bootstrap_model_path
+        self.task_system_prompt = task_system_prompt
+        self.teacher_attempt_order = teacher_attempt_order
+        self.memory_settings = memory_settings
 
     def _get_generator(self, model_path: str, adapter_path: Optional[str] = None, teacher_paths: Optional[List[str]] = None):
         if self.generator_type == "multi_teacher":
@@ -164,6 +261,9 @@ class MLXSelfTrainingOrchestrator:
             return EnsembleAgenticTrajectoryGenerator(
                 model_paths=paths,
                 bootstrap_model_path=self.bootstrap_model_path,
+                task_system_prompt=self.task_system_prompt,
+                teacher_attempt_order=self.teacher_attempt_order,
+                memory_settings=self.memory_settings,
             )
         else:
             return MLXGenerator(model_path=model_path, adapter_path=adapter_path)
@@ -336,6 +436,45 @@ if __name__ == "__main__":
         default=None,
         help="Number of iterations to run (overrides default of 1 for smoke, 3 for full)."
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to a JSON config file for model paths, teacher order, and prompt settings."
+    )
+    parser.add_argument(
+        "--teacher-order",
+        type=str,
+        default=None,
+        help="Comma-separated teacher attempt order by index, e.g. '1,2,0'."
+    )
+    parser.add_argument(
+        "--bootstrap-teacher-index",
+        type=int,
+        default=None,
+        help="Teacher index to generate task/questions with (0, 1, or 2)."
+    )
+    parser.add_argument(
+        "--task-prompt-file",
+        type=str,
+        default=None,
+        help="Optional file containing a replacement task-generation system prompt."
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting an existing generate output file or train output directory."
+    )
+    parser.add_argument(
+        "--memory-profile",
+        type=str,
+        choices=["low", "medium", "high", "max"],
+        default=None,
+        help=(
+            "Generation memory profile. low disables teacher caching, medium caches small teachers, "
+            "high is tuned for 128GB Macs, max allows caching larger teachers."
+        )
+    )
     bootstrap_group = parser.add_mutually_exclusive_group()
     bootstrap_group.add_argument(
         "--qwen",
@@ -381,19 +520,42 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Define paths
-    base_model = "/Users/true/.lmstudio/models/mlx-community/gemma-4-26b-a4b-it-bf16"
-    teacher_paths = [
-        "/Users/true/.lmstudio/models/Qwen3.5-9B-oQ8-mtp",
-        "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
-        "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
-    ]
+    run_config = load_run_config(args.config)
+    base_model = run_config["models"]["student"]
+    teacher_paths = run_config["models"]["teachers"]
+    if len(teacher_paths) < 1:
+        print("ERROR: Config must include at least one teacher model path.")
+        sys.exit(1)
+
+    teacher_attempt_order = run_config.get("generation", {}).get("teacher_attempt_order") or list(range(len(teacher_paths)))
+    if args.teacher_order:
+        try:
+            teacher_attempt_order = [int(part.strip()) for part in args.teacher_order.split(",") if part.strip()]
+        except ValueError:
+            print("ERROR: --teacher-order must be comma-separated integers, e.g. '1,2,0'.")
+            sys.exit(1)
+
+    task_system_prompt = run_config.get("generation", {}).get("task_system_prompt") or None
+    if args.task_prompt_file:
+        with open(args.task_prompt_file, "r") as f:
+            task_system_prompt = f.read()
+    memory_settings = memory_settings_from_config(run_config, args.memory_profile)
 
     bootstrap_model = None
     if args.qwen:
-        bootstrap_model = teacher_paths[1]
+        bootstrap_index = 1
     elif args.gemma:
-        bootstrap_model = teacher_paths[2]
+        bootstrap_index = 2
+    elif args.bootstrap_teacher_index is not None:
+        bootstrap_index = args.bootstrap_teacher_index
+    else:
+        bootstrap_index = run_config.get("generation", {}).get("bootstrap_teacher_index")
+
+    if bootstrap_index is not None:
+        if bootstrap_index < 0 or bootstrap_index >= len(teacher_paths):
+            print(f"ERROR: bootstrap teacher index {bootstrap_index} is out of range for {len(teacher_paths)} teachers.")
+            sys.exit(1)
+        bootstrap_model = teacher_paths[bootstrap_index]
 
     if args.mode == "generate-only":
         run_generate_only(
@@ -401,6 +563,10 @@ if __name__ == "__main__":
             num_samples=args.samples,
             output_path=args.output,
             bootstrap_model_path=bootstrap_model,
+            task_system_prompt=task_system_prompt,
+            teacher_attempt_order=teacher_attempt_order,
+            overwrite=args.overwrite,
+            memory_settings=memory_settings,
         )
 
     elif args.mode == "train-only":
@@ -413,6 +579,7 @@ if __name__ == "__main__":
             output_dir=args.train_output,
             training_iters=args.train_iters,
             resume_adapter_path=args.resume,
+            overwrite=args.overwrite,
         )
 
     elif args.mode == "smoke":
@@ -425,7 +592,10 @@ if __name__ == "__main__":
             generator_type="agentic",
             training_iters=15,
             resume_adapter_path=args.resume,
-            bootstrap_model_path=bootstrap_model
+            bootstrap_model_path=bootstrap_model,
+            task_system_prompt=task_system_prompt,
+            teacher_attempt_order=teacher_attempt_order,
+            memory_settings=memory_settings,
         )
         orchestrator.run(teacher_paths=teacher_paths)
 
@@ -442,7 +612,10 @@ if __name__ == "__main__":
                 generator_type="agentic",
                 training_iters=600,
                 resume_adapter_path=args.resume,
-                bootstrap_model_path=bootstrap_model
+                bootstrap_model_path=bootstrap_model,
+                task_system_prompt=task_system_prompt,
+                teacher_attempt_order=teacher_attempt_order,
+                memory_settings=memory_settings,
             )
             orchestrator.run(teacher_paths=teacher_paths)
         except KeyboardInterrupt:

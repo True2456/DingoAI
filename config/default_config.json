@@ -1,0 +1,30 @@
+{
+  "models": {
+    "student": "/Users/true/.lmstudio/models/mlx-community/gemma-4-26b-a4b-it-bf16",
+    "teachers": [
+      "/Users/true/.lmstudio/models/Qwen3.5-9B-oQ8-mtp",
+      "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
+      "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
+    ]
+  },
+  "generation": {
+    "bootstrap_teacher_index": 1,
+    "teacher_attempt_order": [
+      0,
+      1,
+      2
+    ],
+    "task_system_prompt": ""
+  },
+  "hardware": {
+    "memory_profile": "high",
+    "system_ram_gb": 128,
+    "teacher_cache_limit_gb": 45,
+    "bootstrap_max_model_gb": 45,
+    "cache_teachers": true
+  },
+  "training": {
+    "default_train_iters": 200,
+    "default_train_output": "models/mlx_self_training/train_only"
+  }
+}

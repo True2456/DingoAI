@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MLX Self Training Console</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>MLX Self Training Console</h1>
+      <p>Configure teachers, generate trajectories, train adapters, resume runs, and create reports from one local UI.</p>
+    </header>
+
+    <section class="grid two">
+      <article class="card">
+        <h2>Models</h2>
+        <label>Student Model<input id="student" type="text" data-browse="dir"></label>
+        <label>Teacher 1<input id="teacher0" type="text" data-browse="dir"></label>
+        <label>Teacher 2<input id="teacher1" type="text" data-browse="dir"></label>
+        <label>Teacher 3<input id="teacher2" type="text" data-browse="dir"></label>
+        <div class="row">
+          <label>Question Generator
+            <select id="bootstrap">
+              <option value="">Auto</option>
+              <option value="0">Teacher 1</option>
+              <option value="1">Teacher 2</option>
+              <option value="2">Teacher 3</option>
+            </select>
+          </label>
+          <label>Answer Order
+            <input id="teacher-order" type="text" placeholder="0,1,2">
+          </label>
+        </div>
+        <div class="row">
+          <label>System RAM GB
+            <input id="system-ram-gb" type="number" min="8" step="1" value="128">
+          </label>
+          <label>Cache Limit GB
+            <input id="teacher-cache-limit" type="number" min="0" step="1">
+          </label>
+        </div>
+        <div class="row">
+          <label>Bootstrap Max GB
+            <input id="bootstrap-max-model" type="number" min="1" step="1">
+          </label>
+          <label class="check-row"><input id="cache-teachers" type="checkbox"> Cache teachers between attempts</label>
+        </div>
+        <button id="save-config">Save Settings</button>
+      </article>
+
+      <article class="card">
+        <h2>Generation Prompt</h2>
+        <p class="muted">Leave blank to use the built-in Claude Code tool-use curriculum prompt.</p>
+        <textarea id="task-prompt" rows="14"></textarea>
+      </article>
+    </section>
+
+    <section class="grid three">
+      <article class="card">
+        <h2>Generate</h2>
+        <label>Samples<input id="gen-samples" type="number" value="20" min="1"></label>
+        <label>Output JSONL<input id="gen-output" type="text" value="data/generated/gui_claude_tool_traces.jsonl" data-browse="save-file"></label>
+        <label class="check-row"><input id="gen-overwrite" type="checkbox"> Allow overwrite</label>
+        <button data-job="generate">Generate</button>
+      </article>
+
+      <article class="card">
+        <h2>Train</h2>
+        <label>Input JSONL<input id="train-data" type="text" placeholder="data/generated/file.jsonl" data-browse="file"></label>
+        <label>Train Iterations<input id="train-iters" type="number" value="200" min="1"></label>
+        <label>Output Adapter Dir<input id="train-output" type="text" value="models/mlx_self_training/gui_train" data-browse="dir"></label>
+        <label>Resume Adapter Dir<input id="train-resume" type="text" placeholder="optional" data-browse="dir"></label>
+        <label class="check-row"><input id="train-overwrite" type="checkbox"> Allow overwrite</label>
+        <button data-job="train">Train Only</button>
+      </article>
+
+      <article class="card">
+        <h2>Run Control</h2>
+        <button data-job="smoke">Smoke</button>
+        <button data-job="full">Full</button>
+        <button data-job="resume">Resume Latest</button>
+        <label>Report JSONL files<input id="report-files" type="text" placeholder="data/generated/a.jsonl data/generated/b.jsonl" data-browse="multi-file"></label>
+        <button data-job="report">Generate Report</button>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>Jobs</h2>
+      <div id="jobs"></div>
+    </section>
+  </main>
+
+  <div id="browser-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h2>Select Path</h2>
+          <code id="browser-current"></code>
+        </div>
+        <button id="browser-close">Close</button>
+      </div>
+      <div id="browser-roots" class="root-list"></div>
+      <div class="browser-actions">
+        <button id="browser-parent">Parent</button>
+        <button id="browser-use-current">Use Current Directory</button>
+      </div>
+      <div id="browser-list" class="browser-list"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
