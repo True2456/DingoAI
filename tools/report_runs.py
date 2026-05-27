@@ -39,16 +39,57 @@ def slugify(value: str) -> str:
 
 def short_teacher(path: str | None) -> str:
     if not path:
-        return "unknown"
+        return "legacy-unrecorded"
     if path == "fallback":
         return "fallback"
     return Path(path).name
 
 
+def sample_turns(sample: dict[str, Any]) -> list[dict[str, Any]]:
+    turns = sample.get("turns")
+    if isinstance(turns, list) and turns:
+        return turns
+
+    thoughts = str(sample.get("thought", "")).split(" | ")
+    actions = str(sample.get("actions", "")).split(" | ")
+    observations = str(sample.get("observation", "")).split(" | ")
+    count = max(len(thoughts), len(actions), len(observations))
+    reconstructed = []
+    for index in range(count):
+        action_text = actions[index].strip() if index < len(actions) else "none: "
+        if not action_text:
+            continue
+        if ":" in action_text:
+            action_type, action_input = action_text.split(":", 1)
+            action_type = action_type.strip() or "unknown"
+            action_input = action_input.strip()
+        else:
+            action_type = action_text.strip() or "unknown"
+            action_input = ""
+
+        observation = observations[index].strip() if index < len(observations) else ""
+        stderr = observation if any(token in observation.lower() for token in ["error", "traceback", "failed"]) else ""
+        stdout = "" if stderr else observation
+        reconstructed.append({
+            "turn": index + 1,
+            "thought": thoughts[index].strip() if index < len(thoughts) else "",
+            "action": {
+                "type": action_type,
+                "input": action_input,
+            },
+            "observation": {
+                "stdout": stdout,
+                "stderr": stderr,
+                "success": not bool(stderr),
+            },
+        })
+    return reconstructed
+
+
 def action_sequence(sample: dict[str, Any]) -> list[str]:
     return [
         (turn.get("action") or {}).get("type", "unknown")
-        for turn in sample.get("turns", [])
+        for turn in sample_turns(sample)
     ]
 
 
@@ -76,10 +117,11 @@ def workflow_quality(sample: dict[str, Any]) -> dict[str, bool]:
     verified = any(
         (turn.get("action") or {}).get("type") == "python"
         and (turn.get("observation") or {}).get("success", False)
-        for turn in sample.get("turns", [])
+        for turn in sample_turns(sample)
     )
     return {
         "tool_workflow": has_write and has_python,
+        "legacy_inline_python": has_python and not has_write,
         "inspect_before_or_after": has_inspect,
         "verified": verified,
         "completed": has_none,
@@ -100,7 +142,7 @@ def build_summary(paths: list[Path]) -> dict[str, Any]:
     for sample in rows:
         teacher_counts[short_teacher(sample.get("teacher_model"))] += 1
         curriculum_counts[classify_task(sample.get("instruction", ""))] += 1
-        turns = sample.get("turns", [])
+        turns = sample_turns(sample)
         turn_counts.append(len(turns))
         failed_attempt_total += int(sample.get("failed_attempt_count", 0) or 0)
         action_counts.update(action_sequence(sample))
@@ -174,7 +216,9 @@ def sample_table(samples: list[dict[str, Any]]) -> str:
         flags = []
         if sample.get("teacher_model") == "fallback":
             flags.append("fallback")
-        if not quality["tool_workflow"]:
+        if quality["legacy_inline_python"]:
+            flags.append("legacy inline-python")
+        elif not quality["tool_workflow"]:
             flags.append("no tool workflow")
         if not quality["verified"]:
             flags.append("no verification")
@@ -184,7 +228,7 @@ def sample_table(samples: list[dict[str, Any]]) -> str:
         rows.append(
             "<tr>"
             f"<td>{idx}</td><td>{instruction}</td><td>{teacher}</td>"
-            f"<td>{len(sample.get('turns', []))}</td><td><code>{html.escape(seq)}</code></td>"
+            f"<td>{len(sample_turns(sample))}</td><td><code>{html.escape(seq)}</code></td>"
             f"<td>{html.escape(flag_text)}</td>"
             "</tr>"
         )
@@ -203,6 +247,7 @@ def render_html(summary: dict[str, Any]) -> str:
             metric("Samples", str(total), "accepted rows in JSONL"),
             metric("Sandbox Success", pct(summary["sandbox_success_count"], total), f"{summary['sandbox_success_count']} / {total}"),
             metric("Tool Workflow", pct(quality.get("tool_workflow", 0), total), "write_file + python"),
+            metric("Legacy Inline", pct(quality.get("legacy_inline_python", 0), total), "python without file tools"),
             metric("Verified", pct(quality.get("verified", 0), total), "python action succeeded"),
             metric("Avg Turns", f"{summary['avg_turns']:.1f}", f"max {summary['max_turns']}"),
             metric("Recovered Failures", str(summary["failed_attempt_total"]), "linked failed attempts"),
@@ -289,7 +334,7 @@ def write_report(paths: list[Path], output_dir: Path | None) -> Path:
             "teacher_model": short_teacher(sample.get("teacher_model")),
             "sandbox_success": sample.get("sandbox_success", True),
             "failed_attempt_count": sample.get("failed_attempt_count", 0),
-            "turn_count": len(sample.get("turns", [])),
+            "turn_count": len(sample_turns(sample)),
             "actions": action_sequence(sample),
             "quality": workflow_quality(sample),
         }

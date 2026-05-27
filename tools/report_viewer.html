@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trajectory Report Viewer</title>
+  <style>
+    :root {
+      --bg: #070810;
+      --card: #101522;
+      --text: #e8f7ff;
+      --muted: #8ea4b8;
+      --cyan: #00f3ff;
+      --pink: #ff2b7a;
+      --violet: #8b5cf6;
+      --green: #22c55e;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top left, #17213f, var(--bg) 48%);
+      color: var(--text);
+    }
+    main { max-width: 1220px; margin: 0 auto; padding: 32px; }
+    h1 {
+      margin: 0 0 8px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      text-shadow: 0 0 24px rgba(0, 243, 255, .45);
+    }
+    h2 { margin: 0 0 16px; font-size: 18px; }
+    code { color: #b9f7ff; }
+    button {
+      border: 1px solid rgba(0, 243, 255, .55);
+      background: rgba(0, 243, 255, .08);
+      color: var(--cyan);
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button:hover { background: rgba(0, 243, 255, .18); }
+    .muted, small { color: var(--muted); }
+    .drop-zone {
+      margin: 24px 0;
+      padding: 34px;
+      border: 2px dashed rgba(0, 243, 255, .45);
+      border-radius: 22px;
+      background: rgba(16, 21, 34, .62);
+      text-align: center;
+      transition: .18s ease;
+    }
+    .drop-zone.dragging {
+      border-color: var(--pink);
+      box-shadow: 0 0 36px rgba(255, 43, 122, .22);
+      transform: scale(1.01);
+    }
+    .drop-zone strong { color: var(--cyan); }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; justify-content: center; }
+    .metrics { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin: 24px 0; }
+    .metric, .card {
+      background: rgba(16, 21, 34, .82);
+      border: 1px solid rgba(0, 243, 255, .18);
+      border-radius: 18px;
+      box-shadow: 0 0 30px rgba(0, 0, 0, .22);
+    }
+    .metric { padding: 16px; min-height: 116px; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    .metric strong { display: block; margin: 8px 0 4px; font-size: 30px; color: var(--cyan); }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .card { padding: 18px; overflow: hidden; }
+    .wide { grid-column: 1 / -1; }
+    .bar-row { display: grid; grid-template-columns: 170px 1fr 54px; gap: 12px; align-items: center; margin: 10px 0; font-size: 14px; }
+    .bar-track { height: 12px; background: #1d2636; border-radius: 999px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 999px; box-shadow: 0 0 14px currentColor; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px; border-bottom: 1px solid rgba(255, 255, 255, .08); vertical-align: top; }
+    th { text-align: left; color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .08em; }
+    .pill {
+      display: inline-block;
+      margin: 2px 4px 2px 0;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(139, 92, 246, .18);
+      color: #d8c8ff;
+      font-size: 12px;
+    }
+    .pill.warn { background: rgba(245, 158, 11, .18); color: #ffd99a; }
+    .pill.good { background: rgba(34, 197, 94, .16); color: #b9ffd1; }
+    .error { color: #ffc7c7; white-space: pre-wrap; }
+    #file-input { display: none; }
+    @media (max-width: 900px) {
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .grid { grid-template-columns: 1fr; }
+      .bar-row { grid-template-columns: 120px 1fr 40px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trajectory Report Viewer</h1>
+    <p class="muted">Drag trajectory JSONL files here. Drop the matching <code>_failed_attempts.jsonl</code> sidecar too if you want recovered failures linked into the report.</p>
+  </header>
+
+  <section id="drop-zone" class="drop-zone">
+    <p><strong>Drop JSONL files here</strong></p>
+    <p class="muted">Supports compact training JSONL and failed-attempt sidecars. Everything runs locally in your browser.</p>
+    <div class="toolbar">
+      <button id="choose-files">Choose Files</button>
+      <button id="download-summary" disabled>Download Summary JSON</button>
+      <input id="file-input" type="file" multiple accept=".jsonl,.json">
+    </div>
+  </section>
+
+  <section id="status" class="muted"></section>
+  <section id="report"></section>
+</main>
+
+<script>
+const ACTION_ORDER = ["write_file", "read_file", "list_dir", "python", "none"];
+let latestSummary = null;
+
+const $ = (id) => document.getElementById(id);
+const dropZone = $("drop-zone");
+const fileInput = $("file-input");
+const statusEl = $("status");
+const reportEl = $("report");
+const downloadBtn = $("download-summary");
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function parseJsonl(text, filename) {
+  const rows = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      rows.push(JSON.parse(trimmed));
+    } catch (error) {
+      throw new Error(`${filename}:${index + 1}: ${error.message}`);
+    }
+  });
+  return rows;
+}
+
+function shortTeacher(path) {
+  if (!path) return "legacy-unrecorded";
+  if (path === "fallback") return "fallback";
+  return String(path).split(/[\\/]/).pop();
+}
+
+function sampleTurns(sample) {
+  if (Array.isArray(sample.turns) && sample.turns.length) return sample.turns;
+
+  const thoughts = String(sample.thought || "").split(" | ");
+  const actions = String(sample.actions || "").split(" | ");
+  const observations = String(sample.observation || "").split(" | ");
+  const count = Math.max(thoughts.length, actions.length, observations.length);
+  const reconstructed = [];
+
+  for (let index = 0; index < count; index++) {
+    const actionText = String(actions[index] || "none: ").trim();
+    if (!actionText) continue;
+
+    let actionType = "unknown";
+    let actionInput = "";
+    if (actionText.includes(":")) {
+      const splitIndex = actionText.indexOf(":");
+      actionType = actionText.slice(0, splitIndex).trim() || "unknown";
+      actionInput = actionText.slice(splitIndex + 1).trim();
+    } else {
+      actionType = actionText || "unknown";
+    }
+
+    const observation = String(observations[index] || "").trim();
+    const isError = /error|traceback|failed/i.test(observation);
+    reconstructed.push({
+      turn: index + 1,
+      thought: String(thoughts[index] || "").trim(),
+      action: { type: actionType, input: actionInput },
+      observation: {
+        stdout: isError ? "" : observation,
+        stderr: isError ? observation : "",
+        success: !isError,
+      },
+    });
+  }
+  return reconstructed;
+}
+
+function actionSequence(sample) {
+  return sampleTurns(sample).map((turn) => turn.action?.type || "unknown");
+}
+
+function classifyTask(instruction) {
+  const text = String(instruction || "").toLowerCase();
+  if (["index.html", "style.css", "frontend", "app.js", "main.js"].some((k) => text.includes(k))) return "frontend";
+  if (["security", "sql injection", "path traversal", "secret", "sanitize", "validator"].some((k) => text.includes(k))) return "security";
+  if (["patch", "buggy", "failing", "fails", "repair"].some((k) => text.includes(k))) return "repair";
+  if (text.includes("refactor")) return "refactor";
+  if (["src/", "tests/", "directory structure", "package", "module"].some((k) => text.includes(k))) return "multi-file";
+  return "algorithm";
+}
+
+function workflowQuality(sample) {
+  const seq = actionSequence(sample);
+  const verified = sampleTurns(sample).some((turn) =>
+    turn.action?.type === "python" && Boolean(turn.observation?.success)
+  );
+  return {
+    tool_workflow: seq.includes("write_file") && seq.includes("python"),
+    legacy_inline_python: seq.includes("python") && !seq.includes("write_file"),
+    inspect_before_or_after: seq.includes("read_file") || seq.includes("list_dir"),
+    verified,
+    completed: seq.includes("none"),
+  };
+}
+
+function counterAdd(counter, key, inc = 1) {
+  counter[key] = (counter[key] || 0) + inc;
+}
+
+function sidecarKey(row) {
+  return row.task_id || row.instruction || "";
+}
+
+async function readFiles(files) {
+  const loaded = [];
+  for (const file of files) {
+    const text = await file.text();
+    loaded.push({ name: file.name, rows: parseJsonl(text, file.name) });
+  }
+  return loaded;
+}
+
+function splitInputs(loaded) {
+  const samples = [];
+  const failedAttempts = [];
+  const files = [];
+
+  for (const item of loaded) {
+    files.push(item.name);
+    const looksLikeSidecar = item.name.includes("failed_attempts");
+    for (const row of item.rows) {
+      if (looksLikeSidecar || Object.prototype.hasOwnProperty.call(row, "failure_reason")) {
+        failedAttempts.push(row);
+      } else {
+        samples.push(row);
+      }
+    }
+  }
+  return { files, samples, failedAttempts };
+}
+
+function linkFailures(samples, failedAttempts) {
+  const grouped = {};
+  for (const failure of failedAttempts) {
+    const key = sidecarKey(failure);
+    if (!key) continue;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(failure);
+  }
+
+  for (const sample of samples) {
+    const embedded = Array.isArray(sample.failed_attempts) ? sample.failed_attempts : [];
+    const linked = grouped[sidecarKey(sample)] || [];
+    if (!embedded.length && linked.length) {
+      sample.failed_attempts = linked;
+      sample.failed_attempt_count = linked.length;
+    } else if (embedded.length) {
+      sample.failed_attempt_count = embedded.length;
+    }
+  }
+}
+
+function summarize(files, samples, failedAttempts) {
+  linkFailures(samples, failedAttempts);
+
+  const summary = {
+    generated_at: new Date().toISOString(),
+    files,
+    total_samples: samples.length,
+    sandbox_success_count: samples.filter((s) => s.sandbox_success !== false).length,
+    fallback_count: samples.filter((s) => s.teacher_model === "fallback").length,
+    failed_attempt_total: samples.reduce((acc, s) => acc + Number(s.failed_attempt_count || 0), 0),
+    sidecar_failed_attempts: failedAttempts.length,
+    avg_turns: 0,
+    max_turns: 0,
+    teacher_counts: {},
+    action_counts: {},
+    curriculum_counts: {},
+    quality_counts: {},
+    samples,
+  };
+
+  const turnCounts = [];
+  for (const sample of samples) {
+    counterAdd(summary.teacher_counts, shortTeacher(sample.teacher_model));
+    counterAdd(summary.curriculum_counts, classifyTask(sample.instruction));
+    const turns = sampleTurns(sample);
+    turnCounts.push(turns.length);
+    actionSequence(sample).forEach((action) => counterAdd(summary.action_counts, action));
+    const quality = workflowQuality(sample);
+    Object.entries(quality).forEach(([key, value]) => {
+      if (value) counterAdd(summary.quality_counts, key);
+    });
+  }
+
+  summary.avg_turns = turnCounts.length ? turnCounts.reduce((a, b) => a + b, 0) / turnCounts.length : 0;
+  summary.max_turns = turnCounts.length ? Math.max(...turnCounts) : 0;
+  return summary;
+}
+
+function pct(numerator, denominator) {
+  if (!denominator) return "0%";
+  return `${Math.round((numerator / denominator) * 100)}%`;
+}
+
+function metric(label, value, sub = "") {
+  return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(sub)}</small></div>`;
+}
+
+function bars(title, data, color = "var(--cyan)") {
+  const entries = Object.entries(data || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (!entries.length) return `<section class="card"><h2>${escapeHtml(title)}</h2><p class="muted">No data.</p></section>`;
+  const maxValue = Math.max(...entries.map(([, value]) => value)) || 1;
+  const body = entries.map(([key, value]) => {
+    const width = Math.max(2, (value / maxValue) * 100);
+    return `<div class="bar-row"><span>${escapeHtml(key)}</span><div class="bar-track"><div class="bar-fill" style="width:${width.toFixed(1)}%;background:${color}"></div></div><strong>${value}</strong></div>`;
+  }).join("");
+  return `<section class="card"><h2>${escapeHtml(title)}</h2>${body}</section>`;
+}
+
+function sampleFlags(sample) {
+  const quality = workflowQuality(sample);
+  const flags = [];
+  if (sample.teacher_model === "fallback") flags.push(["fallback", "warn"]);
+  if (quality.legacy_inline_python) flags.push(["legacy inline-python", "good"]);
+  else if (!quality.tool_workflow) flags.push(["no tool workflow", "warn"]);
+  if (!quality.verified) flags.push(["no verification", "warn"]);
+  if (Number(sample.failed_attempt_count || 0)) flags.push([`${sample.failed_attempt_count} recovered failures`, "good"]);
+  if (!flags.length) flags.push(["good", "good"]);
+  return flags.map(([text, cls]) => `<span class="pill ${cls}">${escapeHtml(text)}</span>`).join("");
+}
+
+function sampleTable(samples) {
+  const rows = samples.map((sample, index) => {
+    const seq = actionSequence(sample).join(" -> ");
+    return `<tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(sample.instruction)}</td>
+      <td>${escapeHtml(shortTeacher(sample.teacher_model))}</td>
+      <td>${sampleTurns(sample).length}</td>
+      <td><code>${escapeHtml(seq)}</code></td>
+      <td>${sampleFlags(sample)}</td>
+    </tr>`;
+  }).join("");
+  return `<section class="card wide"><h2>Sample Review</h2><table><thead><tr><th>#</th><th>Instruction</th><th>Teacher</th><th>Turns</th><th>Actions</th><th>Flags</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+}
+
+function render(summary) {
+  latestSummary = summary;
+  downloadBtn.disabled = !summary.total_samples;
+
+  const total = summary.total_samples;
+  const actionCounts = {};
+  for (const key of ACTION_ORDER) {
+    if (summary.action_counts[key]) actionCounts[key] = summary.action_counts[key];
+  }
+  for (const [key, value] of Object.entries(summary.action_counts)) {
+    if (!ACTION_ORDER.includes(key)) actionCounts[key] = value;
+  }
+
+  const metrics = [
+    metric("Samples", total, "accepted rows"),
+    metric("Sandbox Success", pct(summary.sandbox_success_count, total), `${summary.sandbox_success_count} / ${total}`),
+    metric("Tool Workflow", pct(summary.quality_counts.tool_workflow || 0, total), "write_file + python"),
+    metric("Legacy Inline", pct(summary.quality_counts.legacy_inline_python || 0, total), "python without file tools"),
+    metric("Verified", pct(summary.quality_counts.verified || 0, total), "python action succeeded"),
+    metric("Avg Turns", summary.avg_turns.toFixed(1), `max ${summary.max_turns}`),
+    metric("Recovered Failures", summary.failed_attempt_total, `${summary.sidecar_failed_attempts} sidecar rows`),
+  ].join("");
+
+  reportEl.innerHTML = `
+    <section class="metrics">${metrics}</section>
+    <section class="grid">
+      ${bars("Action Mix", actionCounts, "var(--cyan)")}
+      ${bars("Teacher Contribution", summary.teacher_counts, "var(--pink)")}
+      ${bars("Curriculum Breakdown", summary.curriculum_counts, "var(--violet)")}
+      ${bars("Quality Signals", summary.quality_counts, "var(--green)")}
+      ${sampleTable(summary.samples)}
+    </section>
+  `;
+
+  statusEl.innerHTML = `Loaded ${summary.files.map((file) => `<code>${escapeHtml(file)}</code>`).join(", ")}`;
+}
+
+async function handleFiles(fileList) {
+  try {
+    const files = Array.from(fileList || []).filter((file) => file.name.endsWith(".jsonl") || file.name.endsWith(".json"));
+    if (!files.length) {
+      statusEl.innerHTML = `<span class="error">No .jsonl or .json files selected.</span>`;
+      return;
+    }
+    const loaded = await readFiles(files);
+    const { files: names, samples, failedAttempts } = splitInputs(loaded);
+    const summary = summarize(names, samples, failedAttempts);
+    render(summary);
+  } catch (error) {
+    reportEl.innerHTML = "";
+    statusEl.innerHTML = `<span class="error">${escapeHtml(error.stack || error.message)}</span>`;
+  }
+}
+
+dropZone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  dropZone.classList.add("dragging");
+});
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragging"));
+dropZone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dropZone.classList.remove("dragging");
+  handleFiles(event.dataTransfer.files);
+});
+$("choose-files").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => handleFiles(fileInput.files));
+downloadBtn.addEventListener("click", () => {
+  if (!latestSummary) return;
+  const blob = new Blob([JSON.stringify(latestSummary, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "trajectory_report_summary.json";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
