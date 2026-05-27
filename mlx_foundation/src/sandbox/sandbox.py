@@ -94,6 +94,16 @@ class SandboxExecutor:
             parts = content_str.split(":", 1)
             filename = parts[0].strip()
             content = parts[1]
+            if not filename or "\n" in filename or "\r" in filename:
+                return {
+                    "success": False,
+                    "error": "Invalid write path. action_input must start with 'relative/path.ext:' before file content."
+                }
+            if filename.endswith((".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".txt", ".csv", ".xml")) is False and "/" not in filename:
+                return {
+                    "success": False,
+                    "error": "Invalid write path. Include a filename with an extension or a sandbox-relative directory path."
+                }
 
             file_path = self._safe_path(filename)
             os.makedirs(os.path.dirname(file_path), exist_ok=True)

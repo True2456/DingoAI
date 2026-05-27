@@ -31,6 +31,8 @@ def export_premium_dataset():
                 output = sample.get("output", "")
                 success = sample.get("sandbox_success", True)
                 teacher = sample.get("teacher_model", "Ensemble Teacher")
+                task_id = sample.get("task_id", "")
+                failed_attempt_count = sample.get("failed_attempt_count", 0)
                 
                 # Check for high-fidelity turn structure
                 turns = []
@@ -115,14 +117,17 @@ def export_premium_dataset():
                 premium_entry = {
                     "id": sample_id,
                     "metadata": {
+                        "task_id": task_id,
                         "task_description": instruction,
                         "verified_sandbox_success": success,
                         "teacher_model_origin": teacher,
+                        "failed_attempt_count": failed_attempt_count,
                         "source_file": filename,
                         "format_version": "1.1-HighFidelity"
                     },
                     "conversations": sharegpt_conversations,
-                    "turns_trace": turns
+                    "turns_trace": turns,
+                    "failed_attempts": sample.get("failed_attempts", [])
                 }
                 all_exported.append(premium_entry)
             except Exception as ex:

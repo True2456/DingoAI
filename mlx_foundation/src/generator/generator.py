@@ -1,4 +1,5 @@
 import random
+import hashlib
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import mlx_lm
@@ -350,6 +351,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         # Resume from checkpoint if it exists (crash recovery)
         samples = []
         completed_tasks = set()
+        failed_attempts_path = None
         if checkpoint_path and os.path.exists(checkpoint_path):
             with open(checkpoint_path, "r") as f:
                 for line in f:
@@ -359,6 +361,10 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         samples.append(s)
                         completed_tasks.add(s.get("instruction", ""))
             print(f"Resumed from checkpoint: {len(samples)} samples already completed.")
+
+        if checkpoint_path:
+            base, ext = os.path.splitext(checkpoint_path)
+            failed_attempts_path = f"{base}_failed_attempts{ext or '.jsonl'}"
 
         if task_descriptions is None:
             # Dynamically bootstrap unique programming tasks using a teacher model under 45 GB
@@ -387,6 +393,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
         for i in range(num_samples):
             task = task_descriptions[i % len(task_descriptions)]
+            task_id = hashlib.sha256(task.encode("utf-8")).hexdigest()[:16]
 
             # Skip tasks already completed in a previous (crashed) run
             if task in completed_tasks:
@@ -395,6 +402,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
             # We try up to 3 times to get a successful sandbox trajectory
             max_attempts = 3
             successful_sample = None
+            failed_attempts = []
 
             # Local worker with unified RAM model caching
             def _interact_with_teacher(path: str, t: str, sandbox_dir: str) -> Optional[Dict[str, Any]]:
@@ -550,7 +558,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "{\n"
                             "  \"thought\": \"The files are written, so I will run the test module from the sandbox workspace and rely on assertions for verification.\",\n"
                             "  \"action_type\": \"python\",\n"
-                            "  \"action_input\": \"import runpy\\nrunpy.run_path('tests/test_utils.py')\\nprint('Verified')\",\n"
+                            "  \"action_input\": \"import runpy\\nrunpy.run_path('tests/test_utils.py', run_name='__main__')\\nprint('Verified')\",\n"
                             "  \"final_answer\": \"\"\n"
                             "}"
                         )
@@ -610,17 +618,32 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             }
                         }
 
-                        if action_type == "none" or not action_input:
+                        if action_type == "none":
                             final_answer = step.get("final_answer", "Task complete.")
                             observations_trace.append("Environment complete.")
                             turn_data["observation"]["stdout"] = "Environment complete."
                             turns_array.append(turn_data)
                             break
 
+                        if action_type != "list_dir" and not action_input:
+                            sandbox_success = False
+                            obs = f"Error: action_type '{action_type}' requires non-empty action_input."
+                            observations_trace.append(obs)
+                            turn_data["observation"]["stderr"] = obs
+                            turn_data["observation"]["success"] = False
+                            turns_array.append(turn_data)
+                            break
+
                         # Execute in Sandbox
                         exec_res = sandbox.execute(action_type, action_input)
                         if exec_res.get("success") and not exec_res.get("stderr"):
-                            obs = exec_res.get("stdout", "") or exec_res.get("message", "Success.")
+                            obs = (
+                                exec_res.get("stdout", "")
+                                or exec_res.get("message", "")
+                                or (f"files: {exec_res.get('files')}" if "files" in exec_res else "")
+                                or (exec_res.get("content", "") if "content" in exec_res else "")
+                                or "Success."
+                            )
                             turn_data["observation"]["stdout"] = obs
                         else:
                             sandbox_success = False
@@ -654,6 +677,31 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         pass
 
                     if thought_trace:
+                        action_types = [
+                            (turn.get("action") or {}).get("type")
+                            for turn in turns_array
+                        ]
+                        file_workflow_requested = any(
+                            keyword in t.lower()
+                            for keyword in [
+                                "create ",
+                                "write ",
+                                "patch",
+                                "refactor",
+                                "test",
+                                "verify",
+                                "frontend",
+                                "index.html",
+                                "src/",
+                                "tests/",
+                            ]
+                        )
+                        if file_workflow_requested and ("write_file" not in action_types or "python" not in action_types):
+                            sandbox_success = False
+                            observations_trace.append(
+                                "Rejected: file workflow did not include both write_file and python verification."
+                            )
+
                         return {
                             "instruction": t,
                             "thought": " | ".join(thought_trace),
@@ -687,13 +735,29 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         break
                     else:
                         reason = "Sandbox execution failed or syntax error" if res else "Execution crashed"
+                        failed_attempt = {
+                            "task_id": task_id,
+                            "instruction": task,
+                            "attempt": attempt + 1,
+                            "teacher_model": teacher_path,
+                            "failure_reason": reason,
+                            "trajectory": res,
+                        }
+                        failed_attempts.append(failed_attempt)
+                        if failed_attempts_path:
+                            with open(failed_attempts_path, "a") as failed_f:
+                                failed_f.write(json.dumps(failed_attempt) + "\n")
                         print(f"--> Discarded trajectory due to: {reason}. Retrying with alternative teacher...")
 
             if successful_sample:
+                successful_sample["task_id"] = task_id
+                successful_sample["failed_attempts"] = failed_attempts
+                successful_sample["failed_attempt_count"] = len(failed_attempts)
                 samples.append(successful_sample)
             else:
                 print(f"--> [Warning] Failed to generate a successful sandbox trajectory for task '{task}' after {max_attempts} attempts. Falling back to default high-quality trajectory.")
                 successful_sample = {
+                    "task_id": task_id,
                     "instruction": task,
                     "thought": (
                         "I will use tool-style file operations instead of only describing code. "
@@ -729,7 +793,9 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "observation": {"stdout": "Verified", "stderr": "", "success": True}
                         }
                     ],
-                    "teacher_model": "fallback"
+                    "teacher_model": "fallback",
+                    "failed_attempts": failed_attempts,
+                    "failed_attempt_count": len(failed_attempts),
                 }
                 samples.append(successful_sample)
 

@@ -7,7 +7,7 @@
 # Usage:
 #   ./run_generate.sh                         # generates 100 trajectories
 #   ./run_generate.sh 200                     # generates 200 trajectories
-#   ./run_generate.sh 100 data/batch_002.jsonl  # custom output path
+#   ./run_generate.sh 100 data/my_batch.jsonl   # custom output path
 #   ./run_generate.sh 100 --qwen              # Qwen Coder Next generates task/questions
 #   ./run_generate.sh 100 --gemma             # Gemma generates task/questions
 #   ./run_generate.sh 100 data/batch.jsonl --qwen
@@ -22,7 +22,20 @@ if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
     shift
 fi
 
-OUTPUT="data/generated_trajectories_$(date +%Y%m%d_%H%M%S).jsonl"
+GENERATOR_LABEL="auto"
+for arg in "$@"; do
+    case "$arg" in
+        --qwen)
+            GENERATOR_LABEL="qwen-coder"
+            ;;
+        --gemma)
+            GENERATOR_LABEL="gemma-31b"
+            ;;
+    esac
+done
+
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M")
+OUTPUT="data/generated/claude_tool_traces_${GENERATOR_LABEL}_${SAMPLES}_samples_${TIMESTAMP}.jsonl"
 if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
     OUTPUT="$1"
     shift
