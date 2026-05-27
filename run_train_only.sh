@@ -13,6 +13,12 @@
 #   ./run_train_only.sh data/batch.jsonl 200 models/my_adapter models/mlx_self_training/iteration_1
 # ─────────────────────────────────────────────────────────────────────────────
 
+set -e
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"$ROOT_DIR/setup_venv.sh"
+cd "$ROOT_DIR"
+
 DATA=${1:-""}
 ITERS=${2:-200}
 OUTPUT_DIR=${3:-"models/mlx_self_training/train_only"}
@@ -48,7 +54,7 @@ if [ -n "$RESUME" ]; then
     RESUME_FLAG="--resume $RESUME"
 fi
 
-./mlx_foundation/venv/bin/python mlx_foundation/src/main.py \
+"$ROOT_DIR/mlx_foundation/venv/bin/python" "$ROOT_DIR/mlx_foundation/src/main.py" \
     --mode train-only \
     --data "$DATA" \
     --train-iters "$ITERS" \

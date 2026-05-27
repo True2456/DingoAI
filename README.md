@@ -48,10 +48,10 @@ This project implements a full **Generation → Training → Evaluation** orches
 
 | Component | Description |
 |---|---|
-| `src/generator/generator.py` | `DynamicTaskGenerator` bootstraps unique coding tasks. `EnsembleAgenticTrajectoryGenerator` generates verified thought/action/obs traces using alternating teacher models and a real sandbox executor |
-| `src/trainer/trainer.py` | `MLXTrainer` — LoRA fine-tuning via `mlx_lm`. Loss-masks the prompt and `[OBS]` blocks so the model only learns to generate `[THOUGHT]`, `[ACTION]`, and `[OUTPUT]` |
-| `src/evaluator/evaluator.py` | `MLXEvaluator` — checks agentic syntax conformity, generation quality (via chat template), and perplexity (informational). Collapse gate uses conformity rate, not perplexity |
-| `src/main.py` | `MLXSelfTrainingOrchestrator` — wires everything together, caches generated data, enforces the iter/sample safety ratio |
+| `mlx_foundation/src/generator/generator.py` | `DynamicTaskGenerator` bootstraps unique coding tasks. `EnsembleAgenticTrajectoryGenerator` generates verified thought/action/obs traces using alternating teacher models and a real sandbox executor |
+| `mlx_foundation/src/trainer/trainer.py` | `MLXTrainer` — LoRA fine-tuning via `mlx_lm`. Loss-masks the prompt and `[OBS]` blocks so the model only learns to generate `[THOUGHT]`, `[ACTION]`, and `[OUTPUT]` |
+| `mlx_foundation/src/evaluator/evaluator.py` | `MLXEvaluator` — checks agentic syntax conformity, generation quality (via chat template), and perplexity (informational). Collapse gate uses conformity rate, not perplexity |
+| `mlx_foundation/src/main.py` | `MLXSelfTrainingOrchestrator` — wires everything together, caches generated data, enforces the iter/sample safety ratio |
 
 ## Key Design Decisions
 
@@ -117,15 +117,22 @@ Models are loaded from `~/.lmstudio/models/` and are **not** included in this re
 ## Installation
 
 ```bash
-git clone https://github.com/True2456/LLM-Self-Training-Foundation
-cd LLM-Self-Training-Foundation
+git clone https://github.com/True2456/KoalaAI-Generator
+cd KoalaAI-Generator
 
-python -m venv mlx_foundation/venv
-source mlx_foundation/venv/bin/activate
-pip install -r requirements.txt
+./run_web_gui.sh
 ```
 
+`run_web_gui.sh` creates `mlx_foundation/venv` if it is missing, installs `requirements.txt`, opens the local web console, and starts the server. The first launch can take a few minutes while dependencies install.
+
 ## Usage
+
+### Web GUI
+```bash
+./run_web_gui.sh
+```
+
+The web GUI is the easiest path for new users. It lets you set model paths, teacher order, generation prompt, output paths, overwrite behavior, and Mac memory limits.
 
 ### Smoke test (1 iteration, 1 sample, 15 training steps)
 ```bash
@@ -151,10 +158,10 @@ pip install -r requirements.txt
 
 ### Manual modes
 ```bash
-python mlx_foundation/src/main.py --mode smoke
-python mlx_foundation/src/main.py --mode full
-python mlx_foundation/src/main.py --mode generate-only --samples 100 --output data/batch.jsonl
-python mlx_foundation/src/main.py --mode train-only --data data/batch.jsonl
+./mlx_foundation/venv/bin/python mlx_foundation/src/main.py --mode smoke
+./mlx_foundation/venv/bin/python mlx_foundation/src/main.py --mode full
+./mlx_foundation/venv/bin/python mlx_foundation/src/main.py --mode generate-only --samples 100 --output data/batch.jsonl
+./mlx_foundation/venv/bin/python mlx_foundation/src/main.py --mode train-only --data data/batch.jsonl
 ```
 
 ## Commercial Dataset Exporter (High-Fidelity Packaging)

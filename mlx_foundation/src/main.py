@@ -35,7 +35,7 @@ def load_run_config(config_path: Optional[str] = None) -> dict:
         },
         "generation": {
             "bootstrap_teacher_index": None,
-            "teacher_attempt_order": [0, 1, 2],
+            "teacher_attempt_order": [1, 2, 3],
             "task_system_prompt": "",
         },
         "hardware": {
@@ -82,6 +82,18 @@ def memory_settings_from_config(run_config: dict, profile_override: Optional[str
                 settings[key] = hardware[key]
     settings["memory_profile"] = profile
     return settings
+
+
+def normalize_teacher_order(order: List[int], teacher_count: int) -> List[int]:
+    if not order:
+        return list(range(teacher_count))
+    if all(1 <= idx <= teacher_count for idx in order):
+        return [idx - 1 for idx in order]
+    if all(0 <= idx < teacher_count for idx in order):
+        return order
+    print(f"ERROR: teacher order {order} is out of range for {teacher_count} teachers.")
+    print(f"Use user-facing teacher numbers 1..{teacher_count}, e.g. '1,2,3'.")
+    sys.exit(1)
 
 
 def run_generate_only(
@@ -137,7 +149,7 @@ def run_generate_only(
 
     print(f"\nDone. {len(samples)} trajectories saved to: {output_path}")
     print("Transfer this file to your training machine and run:")
-    print(f"  python src/main.py --mode train-only --data {output_path}")
+    print(f"  ./run_train_only.sh {output_path}")
 
 
 def run_train_only(
@@ -446,7 +458,7 @@ if __name__ == "__main__":
         "--teacher-order",
         type=str,
         default=None,
-        help="Comma-separated teacher attempt order by index, e.g. '1,2,0'."
+        help="Comma-separated teacher attempt order using teacher numbers, e.g. '1,2,3'. Old 0-based configs are still accepted."
     )
     parser.add_argument(
         "--bootstrap-teacher-index",
@@ -527,13 +539,14 @@ if __name__ == "__main__":
         print("ERROR: Config must include at least one teacher model path.")
         sys.exit(1)
 
-    teacher_attempt_order = run_config.get("generation", {}).get("teacher_attempt_order") or list(range(len(teacher_paths)))
+    teacher_attempt_order = run_config.get("generation", {}).get("teacher_attempt_order") or list(range(1, len(teacher_paths) + 1))
     if args.teacher_order:
         try:
             teacher_attempt_order = [int(part.strip()) for part in args.teacher_order.split(",") if part.strip()]
         except ValueError:
-            print("ERROR: --teacher-order must be comma-separated integers, e.g. '1,2,0'.")
+            print("ERROR: --teacher-order must be comma-separated integers, e.g. '1,2,3'.")
             sys.exit(1)
+    teacher_attempt_order = normalize_teacher_order(teacher_attempt_order, len(teacher_paths))
 
     task_system_prompt = run_config.get("generation", {}).get("task_system_prompt") or None
     if args.task_prompt_file:

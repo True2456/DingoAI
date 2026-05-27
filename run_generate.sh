@@ -16,6 +16,12 @@
 #   ./run_train_only.sh data/<batch_file>.jsonl
 # ─────────────────────────────────────────────────────────────────────────────
 
+set -e
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"$ROOT_DIR/setup_venv.sh"
+cd "$ROOT_DIR"
+
 SAMPLES=100
 if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
     SAMPLES="$1"
@@ -52,7 +58,7 @@ if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
 fi
 echo "======================================================"
 
-./mlx_foundation/venv/bin/python mlx_foundation/src/main.py \
+"$ROOT_DIR/mlx_foundation/venv/bin/python" "$ROOT_DIR/mlx_foundation/src/main.py" \
     --mode generate-only \
     --samples "$SAMPLES" \
     --output "$OUTPUT" \

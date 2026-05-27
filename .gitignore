@@ -10,6 +10,17 @@ ENV/
 models/
 data/
 reports/
+scratch/
+Import Sample Sets/
+books.txt
+test_gemma_json.py
+test_gen.py
+test_lora_freeze.py
+test_memory_flush.py
+verify_all_datasets.py
+verify_dataset.py
+verify_dataset_v2.py
+mlx_foundation/src/utils/filter_toxic_data.py
 *.log
 
 # OS

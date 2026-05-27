@@ -10,9 +10,9 @@
   "generation": {
     "bootstrap_teacher_index": 1,
     "teacher_attempt_order": [
-      0,
       1,
-      2
+      2,
+      3
     ],
     "task_system_prompt": ""
   },

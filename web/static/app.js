@@ -22,6 +22,12 @@ function teacherInputs() {
   return [$("teacher0"), $("teacher1"), $("teacher2")];
 }
 
+function displayTeacherOrder(order, teacherCount) {
+  const values = order && order.length ? order : Array.from({ length: teacherCount }, (_, index) => index + 1);
+  const isZeroBased = values.some((value) => value === 0);
+  return values.map((value) => isZeroBased ? value + 1 : value);
+}
+
 function fillForm(data) {
   config = data.config;
   $("student").value = config.models.student || "";
@@ -31,7 +37,7 @@ function fillForm(data) {
   const generation = config.generation || {};
   const hardware = config.hardware || {};
   $("bootstrap").value = generation.bootstrap_teacher_index ?? "";
-  $("teacher-order").value = (generation.teacher_attempt_order || [0, 1, 2]).join(",");
+  $("teacher-order").value = displayTeacherOrder(generation.teacher_attempt_order, teacherInputs().length).join(",");
   $("task-prompt").value = generation.task_system_prompt || "";
   $("system-ram-gb").value = hardware.system_ram_gb ?? 128;
   $("teacher-cache-limit").value = hardware.teacher_cache_limit_gb ?? 45;
@@ -76,7 +82,7 @@ function collectConfig() {
     generation: {
       ...(config.generation || {}),
       bootstrap_teacher_index: bootstrapValue === "" ? null : Number.parseInt(bootstrapValue, 10),
-      teacher_attempt_order: order.length ? order : teachers.map((_, index) => index),
+      teacher_attempt_order: order.length ? order : teachers.map((_, index) => index + 1),
       task_system_prompt: $("task-prompt").value,
     },
     hardware: {
@@ -263,7 +269,7 @@ function renderJob(job) {
   const log = (job.log || []).join("\n");
   const canStop = ["running", "starting"].includes(job.status);
   return `
-    <div class="job">
+    <div class="job" data-job-id="${escapeHtml(job.id)}">
       <div class="job-head">
         <div>
           <strong>${job.type || "job"} / ${job.id}</strong>
@@ -272,7 +278,7 @@ function renderJob(job) {
         ${canStop ? `<button class="danger" data-stop="${job.id}">Stop</button>` : ""}
       </div>
       <p><code>${command}</code></p>
-      <pre>${escapeHtml(log)}</pre>
+      <pre class="job-log">${escapeHtml(log)}</pre>
     </div>
   `;
 }
@@ -288,11 +294,32 @@ function escapeHtml(value) {
 
 async function refreshJobs() {
   const { jobs } = await api("/api/jobs");
+  const previousScroll = new Map();
+  document.querySelectorAll(".job").forEach((jobEl) => {
+    const logEl = jobEl.querySelector(".job-log");
+    if (!logEl) return;
+    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
+    previousScroll.set(jobEl.dataset.jobId, {
+      atBottom,
+      scrollTop: logEl.scrollTop,
+    });
+  });
+
   $("jobs").innerHTML = jobs.slice().reverse().map(renderJob).join("") || "<p class='muted'>No jobs yet.</p>";
   document.querySelectorAll("[data-stop]").forEach((button) => {
     button.addEventListener("click", () => stopJob(button.dataset.stop));
   });
   activeJobs = new Set(jobs.filter((job) => ["running", "starting", "stopping"].includes(job.status)).map((job) => job.id));
+  document.querySelectorAll(".job").forEach((jobEl) => {
+    const logEl = jobEl.querySelector(".job-log");
+    if (!logEl) return;
+    const state = previousScroll.get(jobEl.dataset.jobId);
+    if (!state || state.atBottom || activeJobs.has(jobEl.dataset.jobId)) {
+      logEl.scrollTop = logEl.scrollHeight;
+    } else {
+      logEl.scrollTop = state.scrollTop;
+    }
+  });
 }
 
 async function init() {

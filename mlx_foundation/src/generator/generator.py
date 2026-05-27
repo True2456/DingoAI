@@ -771,49 +771,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                 successful_sample["failed_attempt_count"] = len(failed_attempts)
                 samples.append(successful_sample)
             else:
-                print(f"--> [Warning] Failed to generate a successful sandbox trajectory for task '{task}' after {max_attempts} attempts. Falling back to default high-quality trajectory.")
-                successful_sample = {
-                    "task_id": task_id,
-                    "instruction": task,
-                    "thought": (
-                        "I will use tool-style file operations instead of only describing code. "
-                        "First I create a source file, then I inspect the workspace, and finally I run verification."
-                    ),
-                    "actions": (
-                        "write_file: src/fallback.py:def solve():\n    return 'verified'\n | "
-                        "list_dir:  | "
-                        "python: import runpy, os\nassert 'src/fallback.py' in [p.replace('\\\\', '/') for root, _, files in os.walk('.') for p in [os.path.join(root, f).lstrip('./') for f in files]]\nns = runpy.run_path('src/fallback.py')\nassert ns['solve']() == 'verified'\nprint('Verified')"
-                    ),
-                    "observation": (
-                        "Successfully wrote src/fallback.py | files: ['src/fallback.py'] | Verified"
-                    ),
-                    "output": "Created a source file, inspected the workspace, and verified it with assertions.",
-                    "sandbox_success": True,
-                    "turns": [
-                        {
-                            "turn": 1,
-                            "thought": "I need to create an actual file in the workspace.",
-                            "action": {"type": "write_file", "input": "src/fallback.py:def solve():\n    return 'verified'\n"},
-                            "observation": {"stdout": "Successfully wrote src/fallback.py", "stderr": "", "success": True}
-                        },
-                        {
-                            "turn": 2,
-                            "thought": "I will list the workspace to confirm the file exists.",
-                            "action": {"type": "list_dir", "input": ""},
-                            "observation": {"stdout": "files: ['src/fallback.py']", "stderr": "", "success": True}
-                        },
-                        {
-                            "turn": 3,
-                            "thought": "I will run a verification script that imports the file and checks behavior.",
-                            "action": {"type": "python", "input": "import runpy\nns = runpy.run_path('src/fallback.py')\nassert ns['solve']() == 'verified'\nprint('Verified')"},
-                            "observation": {"stdout": "Verified", "stderr": "", "success": True}
-                        }
-                    ],
-                    "teacher_model": "fallback",
-                    "failed_attempts": failed_attempts,
-                    "failed_attempt_count": len(failed_attempts),
-                }
-                samples.append(successful_sample)
+                print(
+                    f"--> [Warning] Failed to generate a successful sandbox trajectory for task '{task}' "
+                    f"after {max_attempts} attempts. Skipping this task; failed attempts were recorded."
+                )
+                continue
 
             # Write sample immediately so a crash doesn't lose prior work
             if checkpoint_path:
