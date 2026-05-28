@@ -785,7 +785,10 @@ async function refreshJobs() {
 async function init() {
   setupPathBrowsers();
   fillForm(await api("/api/config"));
-  await loadPresetsFromServer();
+  await loadPresetsFromServer().catch(() => {
+    presets = { presets: {} };
+    refreshPresetSelects();
+  });
 
   $("save-config").addEventListener("click", () => saveConfig().catch((e) => toast(e.message, "error")));
 

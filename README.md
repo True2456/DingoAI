@@ -22,7 +22,7 @@ Opens **http://127.0.0.1:8765** (local machine only).
 
 ### Screenshots
 
-![DingoAI console — models, prompts, generate/train controls, and job logs](docs/images/dingoai-console-overview.png)
+![DingoAI console — models, prompts, generate/train controls, and job logs](https://raw.githubusercontent.com/True2456/DingoAI/main/docs/images/dingoai-console-overview.png)
 
 Features in the UI:
 
