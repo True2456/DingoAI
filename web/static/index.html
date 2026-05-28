@@ -3,23 +3,39 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MLX Self Training Console</title>
+  <title>DingoAI — MLX Training Console</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
   <main>
-    <header>
-      <h1>MLX Self Training Console</h1>
-      <p>Configure teachers, generate trajectories, train adapters, resume runs, and create reports from one local UI.</p>
+    <header class="site-header">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">🐕</div>
+        <div>
+          <h1>DingoAI</h1>
+          <p class="tagline">Local MLX agent training · Claude Code–style tool use</p>
+        </div>
+      </div>
+      <p class="local-banner">Local machine only · bound to <code id="host-hint">127.0.0.1</code></p>
     </header>
 
     <section class="grid two">
       <article class="card">
-        <h2>Models</h2>
-        <label>Student Model<input id="student" type="text" data-browse="dir"></label>
-        <label>Teacher 1<input id="teacher0" type="text" data-browse="dir"></label>
-        <label>Teacher 2<input id="teacher1" type="text" data-browse="dir"></label>
-        <label>Teacher 3<input id="teacher2" type="text" data-browse="dir"></label>
+        <h2>Models &amp; hardware</h2>
+        <div class="preset-bar">
+          <label>Preset
+            <select id="models-preset-select"><option value="">— load preset —</option></select>
+          </label>
+          <button type="button" id="models-preset-load" class="secondary">Load</button>
+          <button type="button" id="models-preset-save" class="secondary">Save as…</button>
+          <button type="button" id="models-preset-delete" class="danger subtle">Delete</button>
+        </div>
+        <label class="path-label">Student model<input id="student" type="text" data-browse="dir"></label>
+        <label class="path-label">Teacher 1<input id="teacher0" type="text" data-browse="dir"></label>
+        <label class="path-label">Teacher 2<input id="teacher1" type="text" data-browse="dir"></label>
+        <label class="path-label">Teacher 3<input id="teacher2" type="text" data-browse="dir"></label>
         <div class="row">
           <label>Question Generator
             <select id="bootstrap">
@@ -47,11 +63,19 @@
           </label>
           <label class="check-row"><input id="cache-teachers" type="checkbox"> Cache teachers between attempts</label>
         </div>
-        <button id="save-config">Save Settings</button>
+        <button id="save-config" type="button">Save settings to config</button>
       </article>
 
       <article class="card">
-        <h2>Generation Prompt</h2>
+        <h2>Generation prompt</h2>
+        <div class="preset-bar">
+          <label>Preset
+            <select id="prompt-preset-select"><option value="">— load preset —</option></select>
+          </label>
+          <button type="button" id="prompt-preset-load" class="secondary">Load</button>
+          <button type="button" id="prompt-preset-save" class="secondary">Save as…</button>
+          <button type="button" id="prompt-preset-delete" class="danger subtle">Delete</button>
+        </div>
         <p class="muted">Leave blank to use the built-in Claude Code tool-use curriculum prompt.</p>
         <textarea id="task-prompt" rows="14"></textarea>
       </article>
@@ -61,28 +85,29 @@
       <article class="card">
         <h2>Generate</h2>
         <label>Samples<input id="gen-samples" type="number" value="20" min="1"></label>
-        <label>Output JSONL<input id="gen-output" type="text" value="data/generated/gui_claude_tool_traces.jsonl" data-browse="save-file"></label>
+        <label class="path-label">Output JSONL<input id="gen-output" type="text" value="data/generated/dingo_run.jsonl" data-browse="save-file"></label>
         <label class="check-row"><input id="gen-overwrite" type="checkbox"> Allow overwrite</label>
-        <button data-job="generate">Generate</button>
+        <button type="button" data-job="generate" data-confirm="Start generation? This loads teacher models and may take a long time.">Generate</button>
       </article>
 
       <article class="card">
         <h2>Train</h2>
-        <label>Input JSONL<input id="train-data" type="text" placeholder="data/generated/file.jsonl" data-browse="file"></label>
-        <label>Train Iterations<input id="train-iters" type="number" value="200" min="1"></label>
-        <label>Output Adapter Dir<input id="train-output" type="text" value="models/mlx_self_training/gui_train" data-browse="dir"></label>
-        <label>Resume Adapter Dir<input id="train-resume" type="text" placeholder="optional" data-browse="dir"></label>
+        <label class="path-label">Input JSONL<input id="train-data" type="text" placeholder="data/curated/all_tool_training.jsonl" data-browse="file"></label>
+        <label>Train Iterations<input id="train-iters" type="number" value="120" min="1"></label>
+        <p id="train-ratio" class="ratio-hint muted">Ratio: —</p>
+        <label class="path-label">Output adapter dir<input id="train-output" type="text" value="models/mlx_self_training/dingo_train" data-browse="dir"></label>
+        <label class="path-label">Resume adapter dir<input id="train-resume" type="text" placeholder="optional" data-browse="dir"></label>
         <label class="check-row"><input id="train-overwrite" type="checkbox"> Allow overwrite</label>
-        <button data-job="train">Train Only</button>
+        <button type="button" data-job="train" data-confirm="Start training? Student model will load into memory.">Train only</button>
       </article>
 
       <article class="card">
-        <h2>Run Control</h2>
-        <button data-job="smoke">Smoke</button>
-        <button data-job="full">Full</button>
-        <button data-job="resume">Resume Latest</button>
-        <label>Report JSONL files<input id="report-files" type="text" placeholder="data/generated/a.jsonl data/generated/b.jsonl" data-browse="multi-file"></label>
-        <button data-job="report">Generate Report</button>
+        <h2>Run control</h2>
+        <button type="button" data-job="smoke" data-confirm="Run smoke test (generate + train pipeline)?">Smoke</button>
+        <button type="button" data-job="full" data-confirm="Run full self-training loop? This is long and resource-heavy.">Full</button>
+        <button type="button" data-job="resume" data-confirm="Resume latest iteration?">Resume latest</button>
+        <label class="path-label">Report JSONL files<input id="report-files" type="text" placeholder="data/generated/a.jsonl" data-browse="multi-file"></label>
+        <button type="button" data-job="report">Generate report</button>
       </article>
     </section>
 
@@ -92,21 +117,46 @@
     </section>
   </main>
 
-  <div id="browser-modal" class="modal hidden">
+  <div id="browser-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="browser-title">
     <div class="modal-card">
       <div class="modal-head">
         <div>
-          <h2>Select Path</h2>
+          <h2 id="browser-title">Select path</h2>
           <code id="browser-current"></code>
         </div>
-        <button id="browser-close">Close</button>
+        <button type="button" id="browser-close">Close</button>
       </div>
       <div id="browser-roots" class="root-list"></div>
       <div class="browser-actions">
-        <button id="browser-parent">Parent</button>
-        <button id="browser-use-current">Use Current Directory</button>
+        <button type="button" id="browser-parent">Parent</button>
+        <button type="button" id="browser-use-current">Select this folder</button>
       </div>
       <div id="browser-list" class="browser-list"></div>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card modal-narrow">
+      <h2 id="confirm-title">Confirm</h2>
+      <p id="confirm-message"></p>
+      <pre id="confirm-command" class="command-preview hidden"></pre>
+      <div class="modal-actions">
+        <button type="button" id="confirm-cancel" class="secondary">Cancel</button>
+        <button type="button" id="confirm-ok">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="preset-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card modal-narrow">
+      <h2 id="preset-modal-title">Save preset</h2>
+      <label>Name<input id="preset-name" type="text" placeholder="my-gemma-setup"></label>
+      <label>Label<input id="preset-label" type="text" placeholder="Gemma first · 128GB"></label>
+      <label>Description<textarea id="preset-description" rows="3"></textarea></label>
+      <div class="modal-actions">
+        <button type="button" id="preset-cancel" class="secondary">Cancel</button>
+        <button type="button" id="preset-ok">Save</button>
+      </div>
     </div>
   </div>
 

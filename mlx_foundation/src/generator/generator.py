@@ -153,7 +153,7 @@ class DynamicTaskGenerator:
                 "observing failures, patching files, and rerunning verification. Prefer repository-editing workflows over single inline scripts.\n"
                 "Mix the difficulty and topics across the following categories:\n"
                 "- Tool-call discipline tasks: explicitly require write_file, read_file, list_dir, and python verification in sequence.\n"
-                "- Patch/edit tasks: create an existing buggy source file, read it, modify or replace it, then run tests to prove the fix.\n"
+                "- Patch/edit tasks: create an initial buggy source file in the empty sandbox, read it, modify or replace it, then run tests to prove the fix.\n"
                 "- Multi-file project tasks: create src/, tests/, utility modules, and verify imports across files.\n"
                 "- Test-first repair tasks: write a failing test first, observe the failure, fix implementation code, then rerun verification.\n"
                 "- Refactor tasks: improve duplicated or messy code while preserving behavior with assertions.\n"
@@ -163,6 +163,7 @@ class DynamicTaskGenerator:
                 "Each task must be a single sentence, concise, require computing or verifying a result dynamically, and "
                 "be structured such that the solution can be verified using self-contained assertions or file-content checks.\n"
                 "The tasks should naturally require multiple steps of reasoning to solve. "
+                "Assume the sandbox starts empty; if a task involves an existing, legacy, or buggy file, the task must explicitly require creating that starting file first. "
                 "At least 65% of tasks should require creating, reading, modifying, or verifying files rather than only running inline Python. "
                 "At least 35% should require multiple files or directories such as src/ and tests/. "
                 "At least 25% should explicitly require patch/edit or test-first repair. "
@@ -174,7 +175,7 @@ class DynamicTaskGenerator:
                 "  \"Create src/cache.py with a buggy LRUCache implementation, write tests/test_cache.py that exposes the bug, then patch src/cache.py and rerun the tests successfully.\",\n"
                 "  \"Write src/utils.py containing a palindrome checker, write tests/test_utils.py that imports it, list the workspace files, and verify all assertions pass.\",\n"
                 "  \"Create index.html, style.css, and main.js for a tiny counter UI, then read the files back and assert that required IDs and event-handler strings exist.\",\n"
-                "  \"Refactor a duplicated temperature conversion script into reusable functions while preserving its original printed outputs with assertions.\",\n"
+                "  \"Create scripts/legacy_temperature.py with duplicated conversion logic, then refactor it into src/temperature.py while preserving the original outputs with assertions.\",\n"
                 "  \"Create src/security.py with an unsafe path join helper, write tests/test_security.py that demonstrates a path traversal bug, then patch the helper and rerun the tests successfully.\"\n"
                 "]"
             )
@@ -467,7 +468,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     sandbox = SandboxExecutor(sandbox_dir)
 
                     history = f"Task: {t}\n"
-                    max_turns = 8
+                    max_turns = 12
                     
                     thought_trace = []
                     actions_trace = []
@@ -476,7 +477,50 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                     sandbox_success = True
                     turns_array = []
                     
-                    force_failure = random.random() < 0.3
+                    task_lower = t.lower()
+                    force_failure = any(
+                        keyword in task_lower
+                        for keyword in (
+                            "buggy",
+                            "expose the bug",
+                            "expose",
+                            "failing test",
+                            "demonstrates the",
+                            "patch",
+                        )
+                    )
+
+                    def _file_workflow_task() -> bool:
+                        return any(
+                            keyword in task_lower
+                            for keyword in (
+                                "create ",
+                                "write ",
+                                "patch",
+                                "refactor",
+                                "test",
+                                "verify",
+                                "frontend",
+                                "index.html",
+                                "src/",
+                                "tests/",
+                            )
+                        )
+
+                    def _is_patch_style_task() -> bool:
+                        return any(
+                            keyword in task_lower
+                            for keyword in (
+                                "buggy",
+                                "patch",
+                                "expose the bug",
+                                "expose",
+                                "failing test",
+                                "rerun the tests",
+                                "rerun tests",
+                                "demonstrates the",
+                            )
+                        )
 
                     def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
                         import json
@@ -511,7 +555,12 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                                             pass
                         return None
 
-                    for turn in range(max_turns):
+                    turn = 0
+                    premature_none_retries = 0
+                    max_premature_none_retries = 2
+                    json_parse_retries = 2
+
+                    while turn < max_turns:
                         system_msg = (
                             "You are an AI programming agent executing actions in a local terminal, similar to Claude Code.\n"
                             "Based on the history, generate your next reasoning step in JSON format.\n"
@@ -519,19 +568,41 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "- 'thought': Your logical analysis of the current state.\n"
                             "- 'action_type': One of:\n"
                             "    'python'     — execute inline Python code\n"
-                            "    'write_file' — write content to a sandbox-relative file (action_input format: 'relative/path.ext:file content here')\n"
+                            "    'write_file' — write content to a sandbox-relative file (action_input format: {\"path\": \"relative/path.ext\", \"content\": \"file content here\"})\n"
                             "    'read_file'  — read a sandbox-relative file (action_input: relative/path.ext)\n"
                             "    'list_dir'   — list files in the workspace\n"
                             "    'none'       — task is complete, provide final_answer\n"
-                            "- 'action_input': The code, file content, or filename as required by action_type.\n"
+                            "- 'action_input': For write_file use an object with path and content. For python/read_file use a string. For list_dir use an empty string.\n"
                             "- 'final_answer': A descriptive string summarizing the result ONLY if action_type is 'none'.\n\n"
                             "CRITICAL: When the task asks you to create or edit files, DO NOT merely describe code or print Markdown code blocks. "
                             "Use write_file/read_file/list_dir/python actions to mutate and verify the workspace. "
+                            "For write_file, ALWAYS set action_input to an object like {\"path\": \"src/app.py\", \"content\": \"...\"}; do not put raw file content directly in action_input. "
+                            "The sandbox starts empty. If the task mentions an existing, legacy, buggy, or original file, create that starting file yourself before reading or refactoring it. "
                             "For file-creation tasks, your first useful action should usually be 'write_file', not 'python'. "
                             "Do NOT hardcode final results. Always write clean Python code to compute results. "
                             "For multi-file tasks, use 'write_file' to create each file first, 'list_dir' to confirm the workspace, then 'python' to execute and verify. "
-                            "For patch/edit and refactor tasks, use 'read_file' before replacing the file with 'write_file'. "
+                            "For patch/edit, security, and refactor tasks, follow this order: "
+                            "(1) write_file the initial implementation (buggy first if the task requires it), "
+                            "(2) write_file tests that demonstrate or expose the bug, "
+                            "(3) python to run tests and observe failure or successful exploit, "
+                            "(4) read_file optional, then write_file the fix, "
+                            "(5) write_file updated tests if secure/correct behavior needs different assertions, "
+                            "(6) python again to verify the fix — never use 'none' immediately after patching, "
+                            "(7) none only after the final python verification succeeds. "
                             "For test-first tasks, write and run a failing test before writing the corrected implementation. "
+                            "For refactor tasks that must preserve behavior, write the duplicated/legacy module first, "
+                            "optionally save a copy as module_original.py, extract shared logic into a helper module, "
+                            "then rewrite the main module to call the helper, add __init__.py if using package imports, "
+                            "write a verify script that imports both versions and asserts identical outputs on the same inputs, "
+                            "and run python on that script before using none. "
+                            "For greenfield parser or validation tasks, implement load/validate with distinct exceptions "
+                            "(e.g. json.JSONDecodeError vs a custom schema error), write unittest cases with tempfile fixtures "
+                            "and assertRaises for each failure mode, use list_dir when the task asks to list the workspace, "
+                            "then run python unittest discover before using none. "
+                            "For buggy-module patch tasks, run python so the exposing test fails, read_file the module if required, "
+                            "patch the implementation, then run python again and use none only after tests pass. "
+                            "Use unittest not pytest; for src/ layouts add sys.path.insert in tests or PYTHONPATH=. when running. "
+                            "When asserting path equality in tests (especially on macOS), use os.path.realpath() not os.path.abspath(). "
                             "Use 'none' only after the workspace has been modified and verification has succeeded. "
                             "You MUST include self-verifying test assertions (using 'assert') at the end of your script "
                             "to programmatically prove your solution is correct. If assertions fail, the script will crash, "
@@ -560,7 +631,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "{\n"
                             "  \"thought\": \"I'll write the utility module first, then verify it by importing it in a test script.\",\n"
                             "  \"action_type\": \"write_file\",\n"
-                            "  \"action_input\": \"src/utils.py:def double(x):\\n    return x * 2\\n\",\n"
+                            "  \"action_input\": {\"path\": \"src/utils.py\", \"content\": \"def double(x):\\n    return x * 2\\n\"},\n"
                             "  \"final_answer\": \"\"\n"
                             "}\n"
                             "Example 3 (inspect existing files during patch/refactor work):\n"
@@ -590,27 +661,40 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         else:
                             prompt = f"{system_msg}\n\n{user_msg}"
 
-                        # Generate output with high token budget to prevent truncations
-                        response = mlx_lm.generate(
-                            model,
-                            tokenizer,
-                            prompt=prompt,
-                            max_tokens=1024,
-                            verbose=False
-                        )
+                        step = None
+                        clean_resp = ""
+                        for json_attempt in range(json_parse_retries + 1):
+                            response = mlx_lm.generate(
+                                model,
+                                tokenizer,
+                                prompt=prompt,
+                                max_tokens=2048,
+                                verbose=False,
+                            )
+                            clean_resp = (
+                                response[len(prompt):].strip()
+                                if response.startswith(prompt)
+                                else response.strip()
+                            )
+                            step = extract_first_json(clean_resp)
+                            if step is not None:
+                                break
+                            print(
+                                f"JSON parse failed (attempt {json_attempt + 1}/"
+                                f"{json_parse_retries + 1})."
+                            )
 
-                        clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
-
-                        # Robustly extract JSON block
-                        step = extract_first_json(clean_resp)
                         if step is None:
-                            print(f"Failed to parse teacher response with extract_first_json. Response was: {clean_resp}")
+                            print(
+                                "Failed to parse teacher response after retries. "
+                                f"Response was: {clean_resp}"
+                            )
                             sandbox_success = False
                             step = {
                                 "thought": "I failed to generate valid JSON.",
                                 "action_type": "none",
                                 "action_input": "",
-                                "final_answer": "Failed."
+                                "final_answer": "Failed.",
                             }
 
                         thought = step.get("thought", "")
@@ -635,6 +719,23 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         }
 
                         if action_type == "none":
+                            wrote_files = any(
+                                (existing.get("action") or {}).get("type") == "write_file"
+                                for existing in turns_array
+                            )
+                            if (
+                                turn == 0
+                                and _file_workflow_task()
+                                and not wrote_files
+                                and premature_none_retries < max_premature_none_retries
+                            ):
+                                premature_none_retries += 1
+                                print(
+                                    "Rejected premature none before file workflow; "
+                                    "retrying generation."
+                                )
+                                continue
+
                             final_answer = step.get("final_answer", "Task complete.")
                             observations_trace.append("Environment complete.")
                             turn_data["observation"]["stdout"] = "Environment complete."
@@ -652,7 +753,23 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
                         # Execute in Sandbox
                         exec_res = sandbox.execute(action_type, action_input)
-                        if exec_res.get("success") and not exec_res.get("stderr"):
+                        if action_type == "python":
+                            stdout = exec_res.get("stdout", "") or ""
+                            stderr = exec_res.get("stderr", "") or ""
+                            if exec_res.get("success") or exec_res.get("expected_test_failure"):
+                                obs = "\n".join(part for part in (stdout, stderr) if part).strip() or "Success."
+                                turn_data["observation"]["stdout"] = obs
+                                turn_data["observation"]["success"] = True
+                                if exec_res.get("verification_passed"):
+                                    turn_data["observation"]["verification_passed"] = True
+                                if exec_res.get("expected_test_failure"):
+                                    turn_data["observation"]["expected_test_failure"] = True
+                            else:
+                                sandbox_success = False
+                                obs = stderr or stdout or exec_res.get("error", "Error.")
+                                turn_data["observation"]["stderr"] = obs
+                                turn_data["observation"]["success"] = False
+                        elif exec_res.get("success"):
                             obs = (
                                 exec_res.get("stdout", "")
                                 or exec_res.get("message", "")
@@ -676,6 +793,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             f"Action ({action_type}): {action_input}\n"
                             f"Observation: {obs}\n"
                         )
+                        turn += 1
 
                     # Keep models cached in RAM, only garbage collect local variables.
                     # If the model was not cached (larger than 45 GB), explicitly unload it.
@@ -697,26 +815,21 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             (turn.get("action") or {}).get("type")
                             for turn in turns_array
                         ]
-                        file_workflow_requested = any(
-                            keyword in t.lower()
-                            for keyword in [
-                                "create ",
-                                "write ",
-                                "patch",
-                                "refactor",
-                                "test",
-                                "verify",
-                                "frontend",
-                                "index.html",
-                                "src/",
-                                "tests/",
-                            ]
-                        )
+                        file_workflow_requested = _file_workflow_task()
                         if file_workflow_requested and ("write_file" not in action_types or "python" not in action_types):
                             sandbox_success = False
                             observations_trace.append(
                                 "Rejected: file workflow did not include both write_file and python verification."
                             )
+
+                        if _is_patch_style_task():
+                            verified = any(
+                                (existing.get("observation") or {}).get("verification_passed")
+                                for existing in turns_array
+                                if (existing.get("action") or {}).get("type") == "python"
+                            )
+                            if verified and "write_file" in action_types:
+                                sandbox_success = True
 
                         return {
                             "instruction": t,

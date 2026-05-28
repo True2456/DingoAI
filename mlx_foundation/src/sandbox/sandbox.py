@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import tempfile
 from typing import Dict, Any
@@ -14,13 +15,15 @@ class SandboxExecutor:
         if not os.path.exists(self.workspace_dir):
             os.makedirs(self.workspace_dir)
 
-    def execute(self, action_type: str, command: str) -> Dict[str, Any]:
+    def execute(self, action_type: str, command: Any) -> Dict[str, Any]:
         """
         Executes a sandboxed action.
         
         Supported actions:
         - 'python': Runs inline Python code.
-        - 'write_file': Writes content to a file (command is formatted as file_path:content).
+        - 'write_file': Writes content to a file.
+          Preferred command format: {"path": "relative/path.ext", "content": "..."}.
+          Legacy command format: "relative/path.ext:content".
         - 'read_file': Reads content of a file (command is file_path).
         - 'list_dir': Lists files in the sandbox workspace.
         """
@@ -46,6 +49,30 @@ class SandboxExecutor:
             raise ValueError(f"Path escapes sandbox: {relative_path}")
         return full_path
 
+    def _looks_like_failed_test_output(self, stdout: str, stderr: str) -> bool:
+        combined = f"{stdout}\n{stderr}"
+        failure_markers = [
+            "FAILED [",
+            " failed, ",
+            " failures, ",
+            " errors, ",
+            "AssertionError",
+            "Traceback (most recent call last):",
+        ]
+        return any(marker in combined for marker in failure_markers)
+
+    def _looks_like_passing_test_output(self, stdout: str, stderr: str) -> bool:
+        """unittest often prints progress to stderr even when all tests pass."""
+        combined = f"{stdout}\n{stderr}"
+        if self._looks_like_failed_test_output(stdout, stderr):
+            return False
+        return (
+            "OK" in combined
+            or "All tests passed" in combined
+            or "Verification successful" in combined
+            or "Verified" in combined
+        )
+
     def _run_python(self, code: str) -> Dict[str, Any]:
         # Write inline code to a temporary file in the sandbox workspace
         with tempfile.NamedTemporaryFile(suffix=".py", dir=self.workspace_dir, delete=False, mode="w") as tmp:
@@ -65,11 +92,18 @@ class SandboxExecutor:
                 cwd=self.workspace_dir,
                 timeout=5 # Safe timeout limit
             )
+            failed_test = self._looks_like_failed_test_output(res.stdout, res.stderr)
+            passed_test = self._looks_like_passing_test_output(res.stdout, res.stderr)
+            verification_passed = res.returncode == 0 and not failed_test
+            expected_test_failure = failed_test and not verification_passed
             return {
-                "success": res.returncode == 0,
+                "success": verification_passed,
+                "verification_passed": verification_passed,
+                "expected_test_failure": expected_test_failure,
+                "tests_passed_signal": passed_test,
                 "stdout": res.stdout,
                 "stderr": res.stderr,
-                "exit_code": res.returncode
+                "exit_code": res.returncode,
             }
         except subprocess.TimeoutExpired:
             return {
@@ -85,19 +119,44 @@ class SandboxExecutor:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    def _write_file(self, content_str: str) -> Dict[str, Any]:
+    def _parse_write_file_input(self, command: Any) -> tuple[str, str] | tuple[None, None]:
+        if isinstance(command, dict):
+            filename = str(command.get("path") or command.get("file_path") or "").strip()
+            content = command.get("content", "")
+            return filename, str(content)
+
+        if not isinstance(command, str):
+            return None, None
+
+        stripped = command.strip()
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    filename = str(parsed.get("path") or parsed.get("file_path") or "").strip()
+                    content = parsed.get("content", "")
+                    return filename, str(content)
+            except json.JSONDecodeError:
+                pass
+
+        # Legacy format: 'filename:content'
+        if ":" not in command:
+            return None, None
+        filename, content = command.split(":", 1)
+        return filename.strip(), content
+
+    def _write_file(self, command: Any) -> Dict[str, Any]:
         try:
-            # Format: 'filename:content'
-            if ":" not in content_str:
-                return {"success": False, "error": "Invalid write format. Use 'relative/path:content'"}
-            
-            parts = content_str.split(":", 1)
-            filename = parts[0].strip()
-            content = parts[1]
+            filename, content = self._parse_write_file_input(command)
+            if filename is None:
+                return {
+                    "success": False,
+                    "error": "Invalid write format. Use {'path': 'relative/path.ext', 'content': '...'}."
+                }
             if not filename or "\n" in filename or "\r" in filename:
                 return {
                     "success": False,
-                    "error": "Invalid write path. action_input must start with 'relative/path.ext:' before file content."
+                    "error": "Invalid write path. Use action_input.path with a sandbox-relative filename."
                 }
             if filename.endswith((".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".txt", ".csv", ".xml")) is False and "/" not in filename:
                 return {

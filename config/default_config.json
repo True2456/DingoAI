@@ -2,25 +2,23 @@
   "models": {
     "student": "/Users/true/.lmstudio/models/mlx-community/gemma-4-26b-a4b-it-bf16",
     "teachers": [
-      "/Users/true/.lmstudio/models/Qwen3.5-9B-oQ8-mtp",
-      "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-8bit",
+      "/Users/true/.lmstudio/models/lmstudio-community/Qwen3-Coder-Next-MLX-4bit",
       "/Users/true/.lmstudio/models/gemma-4-31b-it-oQ8"
     ]
   },
   "generation": {
-    "bootstrap_teacher_index": 1,
+    "bootstrap_teacher_index": 0,
     "teacher_attempt_order": [
-      1,
       2,
-      3
+      1
     ],
-    "task_system_prompt": ""
+    "task_system_prompt": "You are generating RED TEAM security tasks for an MLX self-training pipeline. Every task MUST be completable in an empty sandbox with this tool sequence:\n\nwrite_file (vulnerable code) \u2192 write_file (exploit tests) \u2192 python (MUST show vulnerability or test failure) \u2192 read_file optional \u2192 write_file (patched code and/or updated tests) \u2192 python (MUST pass after fix) \u2192 none\n\nGenerate diverse offensive-security style tasks (stdlib only, no pip, no pytest). At least 80% must require TWO python runs (prove bug, then prove fix). Each task is one clear sentence.\n\nCategories (rotate across them):\n\n1) Path traversal \u2014 naive os.path.join file reader or static file server; tests read outside base with ../; patch with os.path.realpath + prefix guard + ValueError; macOS tests compare realpath not abspath.\n\n2) Unsafe path extraction \u2014 zip/tar path join without sanitizing member names; test writes a malicious relative path; patch to reject .. and absolute paths.\n\n3) Injection-style string handling \u2014 shell=False but flawed command builder or format-string log template; test demonstrates malicious input changes behavior; patch with allowlist or shlex.split + strict validation.\n\n4) Insecure deserialization / parsing \u2014 eval(), pickle-like patterns avoided; use json.loads on untrusted input without size limits or type checks; test supplies malicious JSON; patch with json.loads + schema checks or ast.literal_eval only.\n\n5) Missing authZ on file ops \u2014 API that serves any path under a flag; test accesses forbidden sibling file; patch with explicit role or path allowlist.\n\n6) Secret leakage \u2014 config loader prints env or embeds API key; test asserts secret not in stdout; patch to redact or load from os.environ with validation.\n\n7) TOCTOU / race-lite \u2014 check-then-act file exists without atomic open; test shows bypass with symlink or rename; patch with open flags or exclusive create.\n\nRules:\n- stdlib unittest only; tempfile for fixtures; PYTHONPATH=. or sys.path.insert in tests\n- Say explicitly: first python should FAIL or demonstrate exploit; second python should PASS\n- No src/fallback.py stubs; sandbox starts empty \u2014 task must say to create the vulnerable file first\n- No network calls required; use local files only\n- Wording must name the vulnerability class (path traversal, zip slip, etc.)"
   },
   "hardware": {
-    "memory_profile": "high",
+    "memory_profile": "custom",
     "system_ram_gb": 128,
     "teacher_cache_limit_gb": 45,
-    "bootstrap_max_model_gb": 45,
+    "bootstrap_max_model_gb": 60,
     "cache_teachers": true
   },
   "training": {

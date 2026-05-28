@@ -10,6 +10,6 @@ PORT=${PORT:-8765}
 "$ROOT_DIR/setup_venv.sh"
 cd "$ROOT_DIR"
 
-echo "Opening MLX Self Training Console at http://$HOST:$PORT"
+echo "Opening DingoAI console at http://$HOST:$PORT"
 open "http://$HOST:$PORT" >/dev/null 2>&1 || true
 "$ROOT_DIR/mlx_foundation/venv/bin/python" "$ROOT_DIR/web/server.py" --host "$HOST" --port "$PORT"

@@ -13,12 +13,13 @@ import time
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "web" / "static"
 CONFIG_PATH = ROOT / "config" / "default_config.json"
+PRESETS_PATH = ROOT / "config" / "dingo_presets.json"
 PYTHON = ROOT / "mlx_foundation" / "venv" / "bin" / "python"
 MAIN = ROOT / "mlx_foundation" / "src" / "main.py"
 
@@ -118,6 +119,33 @@ def save_config(config: dict) -> None:
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
         f.write("\n")
+
+
+def load_presets() -> dict:
+    if not PRESETS_PATH.exists():
+        return {"presets": {}}
+    with PRESETS_PATH.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_presets(store: dict) -> None:
+    PRESETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with PRESETS_PATH.open("w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2)
+        f.write("\n")
+
+
+def preset_slug(name: str) -> str:
+    slug = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name.strip().lower())
+    slug = "-".join(part for part in slug.split("-") if part)
+    return slug or "preset"
+
+
+def sanitize_preset_name(name: str) -> str:
+    slug = preset_slug(name)
+    if not slug:
+        raise ValueError("Preset name is required.")
+    return slug
 
 
 def compact_name(path: str) -> str:
@@ -292,12 +320,63 @@ class Handler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             send_json(self, browse_path((query.get("path") or [""])[0]))
             return
-        if parsed.path.startswith("/api/jobs/"):
-            job_id = parsed.path.rsplit("/", 1)[-1]
-            job = JOBS.get(job_id)
-            send_json(self, {"job": job} if job else {"error": "not found"}, 200 if job else 404)
+        if parsed.path == "/api/presets":
+            send_json(self, load_presets())
             return
+        if parsed.path == "/api/file-stats":
+            query = parse_qs(parsed.query)
+            rel = (query.get("path") or [""])[0]
+            path = Path(rel).expanduser()
+            if not path.is_absolute():
+                path = ROOT / path
+            if not path.is_file():
+                send_json(self, {"error": "file not found"}, 404)
+                return
+            lines = sum(1 for line in path.open("r", encoding="utf-8") if line.strip())
+            send_json(self, {"path": str(path.relative_to(ROOT)), "lines": lines})
+            return
+        if parsed.path.startswith("/api/jobs/"):
+            segments = [part for part in parsed.path.split("/") if part]
+            if len(segments) >= 3 and segments[0] == "api" and segments[1] == "jobs":
+                job_id = segments[2]
+                job = JOBS.get(job_id)
+                if len(segments) == 4 and segments[3] == "log":
+                    if not job:
+                        send_json(self, {"error": "not found"}, 404)
+                        return
+                    body = "\n".join(job.get("log") or []) + "\n"
+                    raw = body.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="dingoai-job-{job_id}.log"',
+                    )
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                send_json(self, {"job": job} if job else {"error": "not found"}, 200 if job else 404)
+                return
         return super().do_GET()
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path.startswith("/api/presets/"):
+                name = sanitize_preset_name(unquote(parsed.path.rsplit("/", 1)[-1]))
+                store = load_presets()
+                presets = store.setdefault("presets", {})
+                if name not in presets:
+                    send_json(self, {"error": "preset not found"}, 404)
+                    return
+                del presets[name]
+                save_presets(store)
+                send_json(self, {"ok": True, "deleted": name})
+                return
+            send_json(self, {"error": "not found"}, 404)
+        except Exception as exc:
+            send_json(self, {"error": str(exc)}, 400)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -312,9 +391,42 @@ class Handler(SimpleHTTPRequestHandler):
                 job = start_job(payload)
                 send_json(self, {"job": job})
                 return
+            if parsed.path == "/api/presets":
+                payload = read_json_body(self)
+                name = sanitize_preset_name(payload.get("name") or "")
+                preset_type = payload.get("type")
+                if preset_type not in ("models", "prompt", "combined"):
+                    raise ValueError("Preset type must be models, prompt, or combined.")
+                store = load_presets()
+                presets = store.setdefault("presets", {})
+                entry = {
+                    "type": preset_type,
+                    "label": payload.get("label") or name,
+                    "description": payload.get("description") or "",
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                if preset_type in ("models", "combined"):
+                    entry["models"] = payload.get("models")
+                    entry["generation"] = payload.get("generation")
+                    entry["hardware"] = payload.get("hardware")
+                if preset_type in ("prompt", "combined"):
+                    entry["task_system_prompt"] = payload.get("task_system_prompt") or ""
+                presets[name] = entry
+                save_presets(store)
+                send_json(self, {"ok": True, "name": name, "preset": entry})
+                return
             if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/stop"):
                 job_id = parsed.path.split("/")[-2]
                 send_json(self, {"ok": stop_job(job_id)})
+                return
+            if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/clear-log"):
+                job_id = parsed.path.split("/")[-2]
+                job = JOBS.get(job_id)
+                if not job:
+                    send_json(self, {"error": "not found"}, 404)
+                    return
+                job["log"] = []
+                send_json(self, {"ok": True, "job": job})
                 return
             send_json(self, {"error": "not found"}, 404)
         except Exception as exc:
@@ -328,7 +440,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Web GUI running at http://{args.host}:{args.port}")
+    print(f"DingoAI console running at http://{args.host}:{args.port}")
     print("Press Ctrl-C to stop.")
     server.serve_forever()
 

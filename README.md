@@ -87,6 +87,9 @@ After each iteration, if `token_conformity_rate == 0.0` the loop halts. The conf
 ### Trajectory Caching
 Generated trajectories are saved to `data/iteration_N_trajectories.jsonl` immediately after generation. On the next run, if the file exists it's loaded instead of regenerating (~1hr of teacher compute saved per iteration). Delete the file to force fresh generation.
 
+### Generation findings (Antigravity benchmarks & run notes)
+Teacher prompt tuning, failed-task benchmarks against Antigravity, and per-run lessons are recorded in [`docs/generation_findings.md`](docs/generation_findings.md). Update that file when you finish an Antigravity comparison task or learn something from a generation batch (e.g. `qwencoder7`).
+
 ## Two-Machine Workflow
 
 If you have a second Apple Silicon machine (64GB RAM), use it purely for generation — it only needs the teacher models, not the 26B student.
