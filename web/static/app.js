@@ -1,6 +1,23 @@
 const $ = (id) => document.getElementById(id);
 
+/** Default folder for generate-only JSONL outputs (bare run names resolve here). */
+const GEN_OUTPUT_DIR = "data/generated";
+
+const TRACK_DEFAULTS = {
+  dingo: {
+    genOutput: "data/generated/dingo_run.jsonl",
+    trainData: "data/curated/all_tool_training.jsonl",
+    trainOutput: "models/mlx_self_training/dingo_train",
+  },
+  omlx_claude: {
+    genOutput: "data/generated/omlx_run.jsonl",
+    trainData: "data/curated/all_omlx_tool_training.jsonl",
+    trainOutput: "models/mlx_self_training/pilot_v4_omlx",
+  },
+};
+
 let config = null;
+let activeTrack = "dingo";
 let presets = { presets: {} };
 let activeJobs = new Set();
 /** @type {Map<string, { pinned: boolean }>} */
@@ -53,21 +70,96 @@ function timestampSlug() {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
 }
 
+/** Turn a run label or path into a JSONL path under data/generated when needed. */
+function normalizeGenerateOutput(value) {
+  let v = String(value || "")
+    .trim()
+    .replace(/\\/g, "/");
+  if (!v) return `${GEN_OUTPUT_DIR}/dingo_run.jsonl`;
+  const bareName = !v.includes("/") && !v.startsWith("~");
+  if (bareName) {
+    if (!v.toLowerCase().endsWith(".jsonl")) v = `${v}.jsonl`;
+    return `${GEN_OUTPUT_DIR}/${v}`;
+  }
+  if (!v.toLowerCase().endsWith(".jsonl")) {
+    const base = v.slice(v.lastIndexOf("/") + 1);
+    if (!base.includes(".")) v = `${v}.jsonl`;
+  }
+  return v;
+}
+
+function currentTrack() {
+  const el = $("training-track");
+  return el && el.value === "omlx_claude" ? "omlx_claude" : "dingo";
+}
+
+function trackDefaults(track = currentTrack()) {
+  return TRACK_DEFAULTS[track] || TRACK_DEFAULTS.dingo;
+}
+
+function updateTrackUi() {
+  const track = currentTrack();
+  const defs = trackDefaults(track);
+  const hint = $("track-hint");
+  if (hint) {
+    hint.textContent =
+      track === "omlx_claude"
+        ? "Generate/train use Gemma call:Read{…} markup for Claude Code + oMLX. Dingo pack unchanged."
+        : "Default Dingo track: write_file / python in channel completions.";
+  }
+  const packHint = $("omlx-pack-hint");
+  if (packHint) {
+    packHint.classList.toggle("hidden", track !== "omlx_claude");
+  }
+}
+
+function applyTrackPathDefaults(fromTrack, toTrack) {
+  const prev = trackDefaults(fromTrack);
+  const next = trackDefaults(toTrack);
+  const gen = getPathValue("gen-output");
+  const genLooksLikePrevTrack =
+    !gen ||
+    gen === prev.genOutput ||
+    (fromTrack === "dingo" && gen.includes("dingo_")) ||
+    (fromTrack === "omlx_claude" && gen.includes("omlx_"));
+  if (genLooksLikePrevTrack) {
+    setPathValue("gen-output", next.genOutput);
+  }
+  const data = getPathValue("train-data");
+  if (!data || data === prev.trainData) {
+    setPathValue("train-data", next.trainData);
+  }
+  const out = getPathValue("train-output");
+  if (!out || out === prev.trainOutput || out.includes("gui_")) {
+    setPathValue("train-output", next.trainOutput);
+  }
+  syncAllPathFields();
+  updateTrainRatio().catch(() => {});
+}
+
+function onTrainingTrackChange() {
+  const next = currentTrack();
+  applyTrackPathDefaults(activeTrack, next);
+  activeTrack = next;
+  updateTrackUi();
+}
+
 function setSafeOutputDefaults() {
   const teacherLabel =
     ["auto", "teacher1", "teacher2", "teacher3"][$("bootstrap").value ? Number($("bootstrap").value) + 1 : 0] ||
     "auto";
   const stamp = timestampSlug();
-  const genDefault = "data/generated/dingo_run.jsonl";
-  const trainDefault = "models/mlx_self_training/dingo_train";
+  const defs = trackDefaults();
+  const prefix = currentTrack() === "omlx_claude" ? "omlx" : "dingo";
   if (!$("gen-output").value || $("gen-output").value.includes("gui_")) {
-    setPathValue("gen-output", `data/generated/dingo_${teacherLabel}_${stamp}.jsonl`);
+    setPathValue("gen-output", `data/generated/${prefix}_${teacherLabel}_${stamp}.jsonl`);
   }
   if (!$("train-output").value || $("train-output").value.includes("gui_")) {
-    setPathValue("train-output", `models/mlx_self_training/dingo_train_${stamp}`);
+    setPathValue("train-output", `${defs.trainOutput}_${stamp}`);
   }
-  if (!$("gen-output").value) setPathValue("gen-output", genDefault);
-  if (!$("train-output").value) setPathValue("train-output", trainDefault);
+  if (!$("gen-output").value) setPathValue("gen-output", defs.genOutput);
+  if (!$("train-output").value) setPathValue("train-output", defs.trainOutput);
+  if (!$("train-data").value) setPathValue("train-data", defs.trainData);
   syncAllPathFields();
 }
 
@@ -82,6 +174,11 @@ function fillForm(data) {
   $("bootstrap").value = generation.bootstrap_teacher_index ?? "";
   $("teacher-order").value = displayTeacherOrder(generation.teacher_attempt_order, teacherInputs().length).join(",");
   $("task-prompt").value = generation.task_system_prompt || "";
+  const wf = generation.wire_format === "omlx_claude" ? "omlx_claude" : "dingo";
+  if ($("training-track")) {
+    $("training-track").value = wf;
+    activeTrack = wf;
+  }
   $("system-ram-gb").value = hardware.system_ram_gb ?? 128;
   $("teacher-cache-limit").value = hardware.teacher_cache_limit_gb ?? 45;
   $("bootstrap-max-model").value = hardware.bootstrap_max_model_gb ?? 45;
@@ -96,6 +193,7 @@ function fillForm(data) {
   }
   setSafeOutputDefaults();
   syncAllPathFields();
+  updateTrackUi();
   updateTrainRatio();
 }
 
@@ -116,6 +214,7 @@ function collectConfig() {
       bootstrap_teacher_index: bootstrapValue === "" ? null : Number.parseInt(bootstrapValue, 10),
       teacher_attempt_order: order.length ? order : teachers.map((_, i) => i + 1),
       task_system_prompt: $("task-prompt").value,
+      wire_format: currentTrack(),
     },
     hardware: {
       ...(config.hardware || {}),
@@ -193,6 +292,12 @@ function applyModelsPreset(preset) {
   if (gen.teacher_attempt_order) {
     $("teacher-order").value = displayTeacherOrder(gen.teacher_attempt_order, teacherInputs().length).join(",");
   }
+  if (gen.wire_format === "omlx_claude" && $("training-track")) {
+    $("training-track").value = "omlx_claude";
+    activeTrack = "omlx_claude";
+    updateTrackUi();
+    applyTrackPathDefaults("dingo", "omlx_claude");
+  }
   const hw = preset.hardware || {};
   if (hw.system_ram_gb !== undefined) $("system-ram-gb").value = hw.system_ram_gb;
   if (hw.teacher_cache_limit_gb !== undefined) $("teacher-cache-limit").value = hw.teacher_cache_limit_gb;
@@ -218,8 +323,8 @@ function loadPresetFromSelect(selectId, type) {
     return;
   }
   if (preset.type === "combined") {
-    if (type === "models") applyModelsPreset(preset);
-    else applyPromptPreset(preset);
+    applyModelsPreset(preset);
+    applyPromptPreset(preset);
   } else if (type === "models") {
     applyModelsPreset(preset);
   } else {
@@ -255,6 +360,10 @@ async function savePresetFromModal() {
   if (kind === "models" || kind === "combined") {
     Object.assign(payload, collectModelsSlice());
     payload.models = collectConfig().models;
+    payload.generation = {
+      ...(payload.generation || {}),
+      wire_format: currentTrack(),
+    };
   }
   if (kind === "prompt" || kind === "combined") {
     payload.task_system_prompt = $("task-prompt").value;
@@ -301,12 +410,14 @@ async function updateTrainRatio() {
 }
 
 function jobPayload(type) {
+  const wire_format = currentTrack();
   if (type === "generate") {
     return {
       type,
       samples: Number.parseInt($("gen-samples").value, 10) || 20,
-      output: $("gen-output").value.trim(),
+      output: normalizeGenerateOutput($("gen-output").value),
       overwrite: $("gen-overwrite").checked,
+      wire_format,
     };
   }
   if (type === "train") {
@@ -317,7 +428,11 @@ function jobPayload(type) {
       train_output: $("train-output").value.trim(),
       resume: $("train-resume").value.trim(),
       overwrite: $("train-overwrite").checked,
+      wire_format,
     };
+  }
+  if (type === "build_omlx_pack") {
+    return { type };
   }
   if (type === "report") {
     return {
@@ -333,7 +448,11 @@ function describeCommand(payload) {
     return `generate-only · ${payload.samples} samples → ${payload.output}${payload.overwrite ? " · overwrite" : ""}`;
   }
   if (payload.type === "train") {
-    return `train-only · ${payload.data} · ${payload.train_iters} iters → ${payload.train_output}`;
+    const track = payload.wire_format === "omlx_claude" ? " · oMLX wire" : "";
+    return `train-only · ${payload.data} · ${payload.train_iters} iters → ${payload.train_output}${track}`;
+  }
+  if (payload.type === "build_omlx_pack") {
+    return "build oMLX pack · data/curated/all_omlx_tool_training.jsonl (from Dingo pack)";
   }
   if (payload.type === "report") return `report · ${(payload.files || []).join(" ")}`;
   return payload.type;
@@ -378,9 +497,27 @@ function showConfirm(message, commandText) {
 
 async function startJob(type) {
   await saveConfig();
+  commitAllPathFields();
   const payload = jobPayload(type);
+  if (type === "generate") {
+    payload.output = normalizeGenerateOutput(payload.output);
+    setPathValue("gen-output", payload.output);
+  }
   if (type === "train" && !payload.data) {
     toast("Training requires an input JSONL path.", "error");
+    return;
+  }
+  if (type === "build_omlx_pack") {
+    const ok = await showConfirm(
+      "Build oMLX training pack from all_tool_training.jsonl? Writes all_omlx_tool_training.jsonl only.",
+      describeCommand(payload),
+    );
+    if (!ok) return;
+    const { job } = await api("/api/jobs", { method: "POST", body: JSON.stringify(payload) });
+    logScrollState.set(job.id, { pinned: false });
+    activeJobs.add(job.id);
+    toast(`Job ${job.id} started (build oMLX pack).`, "success");
+    await refreshJobs();
     return;
   }
   if (type === "report" && !payload.files?.length) {
@@ -503,7 +640,9 @@ function commitPathField(id) {
     hidden.value = field.dirEl.value.trim();
     return;
   }
-  hidden.value = joinPathParts(field.dirEl.value, field.nameEl?.value || "");
+  const raw = joinPathParts(field.dirEl.value, field.nameEl?.value || "");
+  hidden.value = id === "gen-output" ? normalizeGenerateOutput(raw) : raw;
+  if (id === "gen-output") syncPathFieldUI(id);
   if (id === "train-data") updateTrainRatio().catch(() => {});
 }
 
@@ -547,7 +686,7 @@ function buildPathField(hiddenInput) {
     nameEl = document.createElement("input");
     nameEl.type = "text";
     nameEl.className = "path-name";
-    nameEl.placeholder = mode === "save-file" ? "dingo_run.jsonl" : "all_tool_training.jsonl";
+    nameEl.placeholder = mode === "save-file" ? "new_model_test" : "all_tool_training.jsonl";
     nameEl.addEventListener("input", () => commitPathField(id));
     nameLabel.appendChild(nameEl);
     nameRow.appendChild(nameLabel);
@@ -703,10 +842,101 @@ function statusClass(status) {
   return `status status-${status || "unknown"}`;
 }
 
+function formatStatNumber(value, digits = 1) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  if (typeof value === "number") return value.toLocaleString(undefined, { maximumFractionDigits: digits });
+  return String(value);
+}
+
+function renderJobStats(job) {
+  const stats = job.stats;
+  if (!stats || !stats.kind) return "";
+
+  if (stats.kind === "train") {
+    const items = [
+      ["Iter", stats.iter],
+      ["Loss", stats.train_loss],
+      ["Val loss", stats.val_loss],
+      ["Tokens/sec", stats.tokens_per_sec],
+      ["It/sec", stats.it_per_sec],
+      ["Trained tokens", stats.trained_tokens],
+      ["Peak mem (GB)", stats.peak_mem_gb],
+      ["LR", stats.learning_rate],
+    ];
+    return `
+      <div class="job-stats job-stats-train" aria-label="Training throughput stats">
+        ${items
+          .map(
+            ([label, value]) => `
+          <div class="job-stat">
+            <span class="job-stat-label">${escapeHtml(label)}</span>
+            <span class="job-stat-value">${escapeHtml(formatStatNumber(value, label === "LR" ? 6 : 2))}</span>
+          </div>`,
+          )
+          .join("")}
+      </div>`;
+  }
+
+  if (stats.kind === "generate") {
+    const tokItems =
+      stats.tokens_per_sec != null
+        ? [
+            ["Tokens/sec", stats.tokens_per_sec],
+            ["Last step tokens", stats.gen_tokens_last],
+          ]
+        : [];
+    const saved = stats.saved_trajectories ?? 0;
+    const target = stats.target_trajectories;
+    const progress =
+      target != null ? `${saved} / ${target} saved` : `${saved} saved`;
+    const bootstrap =
+      stats.bootstrap_total != null
+        ? `${stats.bootstrap_done ?? 0} / ${stats.bootstrap_total} tasks bootstrapped`
+        : null;
+    const attempt =
+      stats.attempt != null && stats.max_attempts != null
+        ? `Attempt ${stats.attempt}/${stats.max_attempts}`
+        : null;
+    const extras = [
+      progress,
+      bootstrap,
+      attempt,
+      stats.discards != null ? `${stats.discards} discards` : null,
+      stats.parse_failures != null ? `${stats.parse_failures} parse failures` : null,
+      stats.progress_pct != null ? `${stats.progress_pct}%` : null,
+    ].filter(Boolean);
+    const task = stats.current_task ? `<p class="job-stat-task muted">${escapeHtml(stats.current_task)}…</p>` : "";
+    return `
+      <div class="job-stats job-stats-generate" aria-label="Generation progress stats">
+        ${tokItems
+          .map(
+            ([label, value]) => `
+          <div class="job-stat">
+            <span class="job-stat-label">${escapeHtml(label)}</span>
+            <span class="job-stat-value">${escapeHtml(formatStatNumber(value, 1))}</span>
+          </div>`,
+          )
+          .join("")}
+        ${extras
+          .map(
+            (text) => `
+          <div class="job-stat">
+            <span class="job-stat-value">${escapeHtml(text)}</span>
+          </div>`,
+          )
+          .join("")}
+      </div>
+      ${task}`;
+  }
+
+  return "";
+}
+
 function renderJob(job) {
   const command = (job.command || []).join(" ");
   const log = (job.log || []).join("\n");
   const canStop = ["running", "starting"].includes(job.status);
+  const statsHtml = renderJobStats(job);
   return `
     <div class="job" data-job-id="${escapeHtml(job.id)}">
       <div class="job-head">
@@ -723,6 +953,7 @@ function renderJob(job) {
         </div>
       </div>
       <p><code>${escapeHtml(command)}</code></p>
+      ${statsHtml}
       <div class="job-log-wrap">
         <pre class="job-log" tabindex="0" aria-label="Job log">${escapeHtml(log)}</pre>
       </div>
@@ -739,8 +970,26 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function updateSessionStatsPanel(sessionStats) {
+  if (!sessionStats) return;
+  const trainTps = $("session-train-tps");
+  const genTps = $("session-gen-tps");
+  const trainTotal = $("session-train-total");
+  const genTotal = $("session-gen-total");
+  if (!trainTps || !genTps) return;
+  trainTps.textContent =
+    sessionStats.train_tokens_per_sec != null
+      ? formatStatNumber(sessionStats.train_tokens_per_sec, 1)
+      : "—";
+  genTps.textContent =
+    sessionStats.gen_tokens_per_sec != null ? formatStatNumber(sessionStats.gen_tokens_per_sec, 1) : "—";
+  trainTotal.textContent = formatStatNumber(sessionStats.train_tokens_total, 0);
+  genTotal.textContent = formatStatNumber(sessionStats.gen_tokens_total, 0);
+}
+
 async function refreshJobs() {
-  const { jobs } = await api("/api/jobs");
+  const { jobs, session_stats: sessionStats } = await api("/api/jobs");
+  updateSessionStatsPanel(sessionStats);
   const scrollTops = new Map();
   document.querySelectorAll(".job-log").forEach((logEl) => {
     const jobId = logEl.closest(".job")?.dataset?.jobId;
@@ -792,6 +1041,11 @@ async function init() {
 
   $("save-config").addEventListener("click", () => saveConfig().catch((e) => toast(e.message, "error")));
 
+  $("training-track")?.addEventListener("change", onTrainingTrackChange);
+  $("build-omlx-pack")?.addEventListener("click", () =>
+    startJob("build_omlx_pack").catch((e) => toast(e.message, "error")),
+  );
+
   $("models-preset-load").addEventListener("click", () => loadPresetFromSelect("models-preset-select", "models"));
   $("prompt-preset-load").addEventListener("click", () => loadPresetFromSelect("prompt-preset-select", "prompt"));
   $("models-preset-save").addEventListener("click", () => openPresetSaveModal("models"));
@@ -823,10 +1077,14 @@ async function init() {
     }
   });
 
+  $("reset-session-stats")?.addEventListener("click", async () => {
+    const { session_stats: sessionStats } = await api("/api/session-stats/reset", { method: "POST", body: "{}" });
+    updateSessionStatsPanel(sessionStats);
+    toast("Throughput totals reset.", "success");
+  });
+
   await refreshJobs();
-  setInterval(() => {
-    if (activeJobs.size) refreshJobs().catch(console.error);
-  }, 2000);
+  setInterval(() => refreshJobs().catch(console.error), 1000);
 }
 
 init().catch((error) => {

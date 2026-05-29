@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -24,6 +25,194 @@ PYTHON = ROOT / "mlx_foundation" / "venv" / "bin" / "python"
 MAIN = ROOT / "mlx_foundation" / "src" / "main.py"
 
 JOBS: dict[str, dict] = {}
+
+SESSION_STATS: dict = {
+    "train_tokens_total": 0,
+    "gen_tokens_total": 0,
+    "last_train_tokens_by_job": {},
+    "train_tokens_per_sec": None,
+    "gen_tokens_per_sec": None,
+}
+
+TRAIN_STATS_RE = re.compile(
+    r"Iter (\d+): Train loss ([\d.]+), Learning Rate ([\d.eE+-]+), "
+    r"It/sec ([\d.]+), Tokens/sec ([\d.]+), Trained Tokens (\d+), Peak mem ([\d.]+) GB"
+)
+VAL_LOSS_RE = re.compile(r"Iter (\d+): Val loss ([\d.]+)")
+BOOTSTRAP_RE = re.compile(r"-> Generated (\d+)/(\d+) unique tasks")
+TRAJECTORY_RE = re.compile(
+    r"Generating agentic trajectory \(Attempt (\d+)/(\d+)\) using teacher .+ for task: '(.{0,80})"
+)
+RESUME_CKPT_RE = re.compile(r"Resumed from checkpoint: (\d+) samples already completed")
+GENERATE_TARGET_RE = re.compile(r"Generating (\d+) agentic trajectories")
+DONE_TRAJ_RE = re.compile(r"Done\. (\d+) trajectories saved")
+GEN_STATS_RE = re.compile(
+    r"\[gen-stats\] label=(\S+) tokens=(\d+) elapsed_s=([\d.]+) tok_s=([\d.]+)"
+)
+
+
+def reset_session_stats() -> dict:
+    SESSION_STATS.clear()
+    SESSION_STATS.update(
+        {
+            "train_tokens_total": 0,
+            "gen_tokens_total": 0,
+            "last_train_tokens_by_job": {},
+            "train_tokens_per_sec": None,
+            "gen_tokens_per_sec": None,
+        }
+    )
+    return session_stats_payload()
+
+
+def session_stats_payload() -> dict:
+    train_live = None
+    gen_live = None
+    for job in JOBS.values():
+        if job.get("status") not in {"starting", "running", "stopping"}:
+            continue
+        job_stats = job.get("stats") or {}
+        if job_stats.get("kind") == "train" and job_stats.get("tokens_per_sec") is not None:
+            train_live = job_stats["tokens_per_sec"]
+        if job_stats.get("kind") == "generate" and job_stats.get("tokens_per_sec") is not None:
+            gen_live = job_stats["tokens_per_sec"]
+    return {
+        "train_tokens_total": int(SESSION_STATS.get("train_tokens_total", 0)),
+        "gen_tokens_total": int(SESSION_STATS.get("gen_tokens_total", 0)),
+        "train_tokens_per_sec": train_live if train_live is not None else SESSION_STATS.get("train_tokens_per_sec"),
+        "gen_tokens_per_sec": gen_live if gen_live is not None else SESSION_STATS.get("gen_tokens_per_sec"),
+    }
+
+
+def accumulate_session_stats(job_id: str, stats: dict, line: str) -> None:
+    if match := GEN_STATS_RE.search(line):
+        tokens = int(match.group(2))
+        tok_s = float(match.group(4))
+        SESSION_STATS["gen_tokens_total"] = int(SESSION_STATS.get("gen_tokens_total", 0)) + tokens
+        SESSION_STATS["gen_tokens_per_sec"] = tok_s
+        stats.setdefault("kind", "generate")
+        stats["tokens_per_sec"] = tok_s
+        stats["gen_tokens_last"] = tokens
+        stats["gen_label"] = match.group(1)
+        stats["gen_elapsed_s"] = float(match.group(3))
+        stats["updated_at"] = time.time()
+        return
+
+    if match := TRAIN_STATS_RE.search(line):
+        trained_tokens = int(match.group(6))
+        last_by_job = SESSION_STATS.setdefault("last_train_tokens_by_job", {})
+        previous = int(last_by_job.get(job_id, 0))
+        delta = max(0, trained_tokens - previous)
+        if delta:
+            SESSION_STATS["train_tokens_total"] = int(SESSION_STATS.get("train_tokens_total", 0)) + delta
+        last_by_job[job_id] = trained_tokens
+        SESSION_STATS["train_tokens_per_sec"] = float(match.group(5))
+
+
+def output_path_from_command(command: list[str]) -> str | None:
+    for index, part in enumerate(command):
+        if part == "--output" and index + 1 < len(command):
+            return command[index + 1]
+    return None
+
+
+def resolve_repo_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def count_jsonl_rows(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+def parse_log_line_stats(job_id: str, stats: dict, line: str) -> None:
+    accumulate_session_stats(job_id, stats, line)
+
+    if match := TRAIN_STATS_RE.search(line):
+        stats.update(
+            {
+                "kind": "train",
+                "iter": int(match.group(1)),
+                "train_loss": float(match.group(2)),
+                "learning_rate": match.group(3),
+                "it_per_sec": float(match.group(4)),
+                "tokens_per_sec": float(match.group(5)),
+                "trained_tokens": int(match.group(6)),
+                "peak_mem_gb": float(match.group(7)),
+                "updated_at": time.time(),
+            }
+        )
+        return
+
+    if match := VAL_LOSS_RE.search(line):
+        stats.setdefault("kind", "train")
+        stats["val_iter"] = int(match.group(1))
+        stats["val_loss"] = float(match.group(2))
+        stats["updated_at"] = time.time()
+        return
+
+    if match := GENERATE_TARGET_RE.search(line):
+        stats["kind"] = "generate"
+        stats["target_trajectories"] = int(match.group(1))
+        return
+
+    if match := BOOTSTRAP_RE.search(line):
+        stats["kind"] = "generate"
+        stats["bootstrap_done"] = int(match.group(1))
+        stats["bootstrap_total"] = int(match.group(2))
+        return
+
+    if match := RESUME_CKPT_RE.search(line):
+        stats["kind"] = "generate"
+        stats["saved_trajectories"] = int(match.group(1))
+        return
+
+    if match := TRAJECTORY_RE.search(line):
+        stats["kind"] = "generate"
+        stats["attempt"] = int(match.group(1))
+        stats["max_attempts"] = int(match.group(2))
+        stats["current_task"] = match.group(3)
+        stats["updated_at"] = time.time()
+        return
+
+    if match := DONE_TRAJ_RE.search(line):
+        stats["kind"] = "generate"
+        stats["saved_trajectories"] = int(match.group(1))
+        return
+
+    if "--> Discarded trajectory" in line:
+        stats["discards"] = int(stats.get("discards", 0)) + 1
+    elif "Failed to parse teacher response" in line:
+        stats["parse_failures"] = int(stats.get("parse_failures", 0)) + 1
+
+
+def enrich_job_stats(job: dict) -> dict:
+    stats = dict(job.get("stats") or {})
+    if job.get("status") in {"starting", "running", "stopping"}:
+        output_value = output_path_from_command(job.get("command") or [])
+        if output_value:
+            rows = count_jsonl_rows(resolve_repo_path(output_value))
+            if rows:
+                stats.setdefault("kind", "generate")
+                stats["saved_trajectories"] = rows
+                if stats.get("target_trajectories"):
+                    stats["progress_pct"] = round(
+                        100 * rows / max(stats["target_trajectories"], 1),
+                        1,
+                    )
+    return stats
+
+
+def job_for_api(job: dict) -> dict:
+    payload = dict(job)
+    payload["stats"] = enrich_job_stats(job)
+    return payload
 
 
 def resolve_browse_path(value: str | None) -> Path:
@@ -163,6 +352,26 @@ def latest_adapter() -> str:
     return ""
 
 
+GEN_OUTPUT_DIR = "data/generated"
+
+
+def normalize_generate_output(path_value: str | None) -> str:
+    """Bare run names become data/generated/<name>.jsonl; full paths get .jsonl if missing."""
+    v = (path_value or "").strip().replace("\\", "/")
+    if not v:
+        return f"{GEN_OUTPUT_DIR}/dingo_run.jsonl"
+    bare = "/" not in v and not v.startswith("~")
+    if bare:
+        if not v.lower().endswith(".jsonl"):
+            v = f"{v}.jsonl"
+        return f"{GEN_OUTPUT_DIR}/{v}"
+    if not v.lower().endswith(".jsonl"):
+        base = v.rsplit("/", 1)[-1]
+        if "." not in base:
+            v = f"{v}.jsonl"
+    return v
+
+
 def path_exists_for_payload(path_value: str | None) -> bool:
     if not path_value:
         return False
@@ -176,8 +385,12 @@ def preflight_job(payload: dict) -> None:
     if payload.get("overwrite"):
         return
     job_type = payload.get("type")
-    if job_type == "generate" and path_exists_for_payload(payload.get("output")):
-        raise ValueError(f"Generate output already exists: {payload.get('output')}. Choose a new path or enable overwrite.")
+    if job_type == "generate":
+        output = normalize_generate_output(payload.get("output"))
+        if path_exists_for_payload(output):
+            raise ValueError(
+                f"Generate output already exists: {output}. Choose a new name or enable overwrite."
+            )
     if job_type == "train" and path_exists_for_payload(payload.get("train_output")):
         raise ValueError(f"Train output directory already exists: {payload.get('train_output')}. Choose a new path or enable overwrite.")
 
@@ -186,14 +399,19 @@ def build_command(payload: dict) -> list[str]:
     job_type = payload.get("type")
     config_arg = ["--config", str(CONFIG_PATH.relative_to(ROOT))]
 
+    wire_format = payload.get("wire_format")
+
     if job_type == "generate":
+        output = normalize_generate_output(payload.get("output"))
         cmd = [
             str(PYTHON), "-u", str(MAIN.relative_to(ROOT)),
             "--mode", "generate-only",
             "--samples", str(payload.get("samples", 20)),
-            "--output", payload.get("output", "data/generated/gui_generation.jsonl"),
+            "--output", output,
             *config_arg,
         ]
+        if wire_format and wire_format != "dingo":
+            cmd.extend(["--wire-format", wire_format])
         if payload.get("overwrite"):
             cmd.append("--overwrite")
         return cmd
@@ -207,11 +425,17 @@ def build_command(payload: dict) -> list[str]:
             "--train-output", payload.get("train_output", "models/mlx_self_training/gui_train"),
             *config_arg,
         ]
+        if wire_format and wire_format != "dingo":
+            cmd.extend(["--wire-format", wire_format])
         if payload.get("resume"):
             cmd.extend(["--resume", payload["resume"]])
         if payload.get("overwrite"):
             cmd.append("--overwrite")
         return cmd
+
+    if job_type == "build_omlx_pack":
+        script = ROOT / "tools" / "build_omlx_training_pack.py"
+        return [str(PYTHON), "-u", str(script)]
 
     if job_type == "resume":
         return ["./run_resume.sh", *config_arg]
@@ -248,9 +472,12 @@ def stream_process(job_id: str, command: list[str]) -> None:
         job["pid"] = process.pid
         job["status"] = "running"
         assert process.stdout is not None
+        stats = job.setdefault("stats", {})
         for line in process.stdout:
-            job["log"].append(line.rstrip("\n"))
+            clean = line.rstrip("\n")
+            job["log"].append(clean)
             job["log"] = job["log"][-2000:]
+            parse_log_line_stats(job_id, stats, clean)
         code = process.wait()
         job["exit_code"] = code
         job["status"] = "completed" if code == 0 else "failed"
@@ -272,6 +499,7 @@ def start_job(payload: dict) -> dict:
         "status": "starting",
         "command": command,
         "log": [],
+        "stats": {},
         "started_at": time.time(),
         "ended_at": None,
         "exit_code": None,
@@ -314,7 +542,16 @@ class Handler(SimpleHTTPRequestHandler):
             })
             return
         if parsed.path == "/api/jobs":
-            send_json(self, {"jobs": list(JOBS.values())})
+            send_json(
+                self,
+                {
+                    "jobs": [job_for_api(job) for job in JOBS.values()],
+                    "session_stats": session_stats_payload(),
+                },
+            )
+            return
+        if parsed.path == "/api/session-stats":
+            send_json(self, session_stats_payload())
             return
         if parsed.path == "/api/browse":
             query = parse_qs(parsed.query)
@@ -356,7 +593,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(raw)
                     return
-                send_json(self, {"job": job} if job else {"error": "not found"}, 200 if job else 404)
+                payload = {"job": job_for_api(job)} if job else {"error": "not found"}
+                send_json(self, payload, 200 if job else 404)
                 return
         return super().do_GET()
 
@@ -386,10 +624,16 @@ class Handler(SimpleHTTPRequestHandler):
                 save_config(payload["config"])
                 send_json(self, {"ok": True, "config": payload["config"]})
                 return
+            if parsed.path == "/api/session-stats/reset":
+                send_json(self, {"ok": True, "session_stats": reset_session_stats()})
+                return
             if parsed.path == "/api/jobs":
                 payload = read_json_body(self)
                 job = start_job(payload)
-                send_json(self, {"job": job})
+                send_json(
+                    self,
+                    {"job": job_for_api(job), "session_stats": session_stats_payload()},
+                )
                 return
             if parsed.path == "/api/presets":
                 payload = read_json_body(self)
@@ -426,7 +670,8 @@ class Handler(SimpleHTTPRequestHandler):
                     send_json(self, {"error": "not found"}, 404)
                     return
                 job["log"] = []
-                send_json(self, {"ok": True, "job": job})
+                job["stats"] = {}
+                send_json(self, {"ok": True, "job": job_for_api(job)})
                 return
             send_json(self, {"error": "not found"}, 404)
         except Exception as exc:

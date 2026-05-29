@@ -52,8 +52,54 @@ def python_codes(sample: Dict[str, Any]) -> List[str]:
     return codes
 
 
+_JSON_ABORT_THOUGHTS = frozenset(
+    {
+        "i failed to generate valid json.",
+        "i failed to generate valid json",
+    }
+)
+
+
+def _turn_thought(turn: Dict[str, Any]) -> str:
+    return (turn.get("thought") or "").strip().lower()
+
+
+def _completed_file_workflow(sample: Dict[str, Any]) -> bool:
+    types = action_types(sample)
+    return bool(
+        types
+        and types[-1] == "none"
+        and "write_file" in types
+        and "python" in types
+        and sample.get("sandbox_success") is True
+    )
+
+
 def is_json_abort(sample: Dict[str, Any]) -> bool:
-    return "failed to generate valid json" in json.dumps(sample).lower()
+    """
+    True only when the trajectory actually ended on a JSON-parse fallback turn.
+
+    Ignores stale abort phrases left in joined legacy `thought` fields when structured
+    `turns` show a completed sandbox workflow (common after premature-none retries).
+    """
+    turns = sample.get("turns")
+    if isinstance(turns, list) and turns:
+        last = turns[-1]
+        last_type = (last.get("action") or {}).get("type")
+        if last_type == "none" and _turn_thought(last) in _JSON_ABORT_THOUGHTS:
+            return True
+        if _completed_file_workflow(sample):
+            return False
+        if sample.get("sandbox_success") is True:
+            return False
+        if any(_turn_thought(t) in _JSON_ABORT_THOUGHTS for t in turns):
+            return True
+        return False
+
+    if sample.get("sandbox_success") is True:
+        return False
+    blob = json.dumps(sample).lower()
+    return "failed to generate valid json" in blob
 
 
 def is_fallback_stub(sample: Dict[str, Any]) -> bool:
@@ -160,6 +206,7 @@ def load_rows(import_dir: Path) -> List[Dict[str, Any]]:
     for path in sorted(import_dir.glob("*.jsonl")):
         if path.name.endswith(".bak"):
             continue
+        # Subfolders (e.g. _archived_fallback_stubs/) are excluded from import curation.
         for line_no, line in enumerate(path.read_text().splitlines(), 1):
             if not line.strip():
                 continue

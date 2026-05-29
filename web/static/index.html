@@ -81,11 +81,26 @@
       </article>
     </section>
 
+    <section class="card track-card">
+      <h2>Training track</h2>
+      <p class="muted">Choose which wire format to use for generate / train jobs. Does not change saved config until you click “Save settings”.</p>
+      <div class="row track-row">
+        <label>Track
+          <select id="training-track">
+            <option value="dingo">Dingo — write_file / python (default)</option>
+            <option value="omlx_claude">oMLX / Claude Code — call:Read{…} tool markup</option>
+          </select>
+        </label>
+        <p id="track-hint" class="track-hint muted"></p>
+      </div>
+    </section>
+
     <section class="grid three">
       <article class="card">
         <h2>Generate</h2>
         <label>Samples<input id="gen-samples" type="number" value="20" min="1"></label>
-        <label class="path-label">Output JSONL<input id="gen-output" type="text" value="data/generated/dingo_run.jsonl" data-browse="save-file"></label>
+        <label class="path-label">Run name<input id="gen-output" type="text" value="data/generated/dingo_run.jsonl" data-browse="save-file"></label>
+        <p class="muted">Type a name only (e.g. <code>new_model_test</code>) — saved as <code>data/generated/&lt;name&gt;.jsonl</code>. Browse to override folder or pick an existing file.</p>
         <label class="check-row"><input id="gen-overwrite" type="checkbox"> Allow overwrite</label>
         <button type="button" data-job="generate" data-confirm="Start generation? This loads teacher models and may take a long time.">Generate</button>
       </article>
@@ -99,6 +114,8 @@
         <label class="path-label">Resume adapter dir<input id="train-resume" type="text" placeholder="optional" data-browse="dir"></label>
         <label class="check-row"><input id="train-overwrite" type="checkbox"> Allow overwrite</label>
         <button type="button" data-job="train" data-confirm="Start training? Student model will load into memory.">Train only</button>
+        <button type="button" id="build-omlx-pack" class="secondary">Build oMLX pack from Dingo curated</button>
+        <p class="muted omlx-only-hint hidden" id="omlx-pack-hint">Writes <code>data/curated/all_omlx_tool_training.jsonl</code> only — does not modify <code>all_tool_training.jsonl</code>.</p>
       </article>
 
       <article class="card">
@@ -109,6 +126,26 @@
         <label class="path-label">Report JSONL files<input id="report-files" type="text" placeholder="data/generated/a.jsonl" data-browse="multi-file"></label>
         <button type="button" data-job="report">Generate report</button>
       </article>
+    </section>
+
+    <section class="card" id="throughput-card">
+      <div class="throughput-head">
+        <h2>Throughput</h2>
+        <button type="button" id="reset-session-stats" class="secondary">Reset totals</button>
+      </div>
+      <div class="session-stats-grid">
+        <div class="session-stat-block">
+          <div class="session-stat-title">Training</div>
+          <div class="session-stat-live"><span id="session-train-tps">—</span> tok/s</div>
+          <div class="session-stat-total">Total processed: <span id="session-train-total">0</span> tokens</div>
+        </div>
+        <div class="session-stat-block">
+          <div class="session-stat-title">Generation</div>
+          <div class="session-stat-live"><span id="session-gen-tps">—</span> tok/s</div>
+          <div class="session-stat-total">Total processed: <span id="session-gen-total">0</span> tokens</div>
+        </div>
+      </div>
+      <p class="muted">Live tok/s from the active job; totals accumulate for this server session until reset.</p>
     </section>
 
     <section class="card">

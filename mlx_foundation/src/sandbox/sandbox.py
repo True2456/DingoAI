@@ -35,6 +35,10 @@ class SandboxExecutor:
             return self._read_file(command)
         elif action_type == "list_dir":
             return self._list_dir()
+        elif action_type == "edit":
+            return self._edit_file(command)
+        elif action_type == "bash":
+            return self._run_bash(command)
         else:
             return {
                 "success": False,
@@ -121,7 +125,9 @@ class SandboxExecutor:
 
     def _parse_write_file_input(self, command: Any) -> tuple[str, str] | tuple[None, None]:
         if isinstance(command, dict):
-            filename = str(command.get("path") or command.get("file_path") or "").strip()
+            filename = str(
+                command.get("path") or command.get("file_path") or ""
+            ).strip()
             content = command.get("content", "")
             return filename, str(content)
 
@@ -172,9 +178,13 @@ class SandboxExecutor:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _read_file(self, filename: str) -> Dict[str, Any]:
+    def _read_file(self, filename: Any) -> Dict[str, Any]:
         try:
-            filename = filename.strip()
+            if isinstance(filename, dict):
+                filename = str(
+                    filename.get("file_path") or filename.get("path") or ""
+                )
+            filename = str(filename).strip()
             file_path = self._safe_path(filename)
             if not os.path.exists(file_path):
                 return {"success": False, "error": f"File '{filename}' not found."}
@@ -182,6 +192,75 @@ class SandboxExecutor:
             with open(file_path, "r") as f:
                 content = f.read()
             return {"success": True, "content": content}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _edit_file(self, command: Any) -> Dict[str, Any]:
+        """Search/replace patch (Claude Edit tool shape)."""
+        try:
+            if isinstance(command, dict):
+                path = str(command.get("file_path") or command.get("path") or "").strip()
+                old_string = command.get("old_string", "")
+                new_string = command.get("new_string", "")
+            else:
+                return {"success": False, "error": "Edit requires a dict with file_path, old_string, new_string."}
+            if not path or old_string is None or new_string is None:
+                return {"success": False, "error": "Edit missing file_path, old_string, or new_string."}
+            file_path = self._safe_path(path)
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"File '{path}' not found."}
+            with open(file_path, "r") as f:
+                content = f.read()
+            if old_string not in content:
+                return {
+                    "success": False,
+                    "error": f"old_string not found in {path}.",
+                }
+            updated = content.replace(old_string, new_string, 1)
+            with open(file_path, "w") as f:
+                f.write(updated)
+            return {
+                "success": True,
+                "message": f"Patched {path} ({len(old_string)} -> {len(new_string)} chars).",
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _run_bash(self, command: Any) -> Dict[str, Any]:
+        """Run a shell command in the sandbox workspace (Claude Bash)."""
+        cmd = command
+        if isinstance(command, dict):
+            cmd = command.get("command") or command.get("cmd") or ""
+        if not isinstance(cmd, str) or not cmd.strip():
+            return {"success": False, "error": "Bash requires non-empty command string."}
+        python_bin = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../venv/bin/python"))
+        env = os.environ.copy()
+        env["PYTHONPATH"] = self.workspace_dir + (os.pathsep + env.get("PYTHONPATH", ""))
+        try:
+            res = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.workspace_dir,
+                timeout=30,
+                env=env,
+            )
+            failed_test = self._looks_like_failed_test_output(res.stdout, res.stderr)
+            passed_test = self._looks_like_passing_test_output(res.stdout, res.stderr)
+            verification_passed = res.returncode == 0 and not failed_test
+            expected_test_failure = failed_test and not verification_passed
+            return {
+                "success": verification_passed,
+                "verification_passed": verification_passed,
+                "expected_test_failure": expected_test_failure,
+                "tests_passed_signal": passed_test,
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+                "exit_code": res.returncode,
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Bash command timed out (30s)."}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

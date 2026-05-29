@@ -321,6 +321,90 @@ button.danger:hover { background: rgba(228, 0, 43, 0.22); }
 .status-completed { color: var(--green-bright); }
 .status-failed { color: var(--red); }
 
+.throughput-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.throughput-head h2 { margin: 0; }
+
+.session-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.session-stat-block {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(0, 56, 168, 0.14);
+  border: 1px solid rgba(255, 205, 0, 0.2);
+}
+
+.session-stat-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(232, 235, 228, 0.7);
+  margin-bottom: 6px;
+}
+
+.session-stat-live {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--gold);
+  margin-bottom: 4px;
+}
+
+.session-stat-total {
+  font-size: 13px;
+  color: #e8ebe4;
+}
+
+.job-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px 12px;
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 56, 168, 0.12);
+  border: 1px solid rgba(255, 205, 0, 0.18);
+}
+
+.job-stats-train .job-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.job-stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(232, 235, 228, 0.65);
+}
+
+.job-stat-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.job-stats-generate .job-stat-value {
+  font-size: 14px;
+}
+
+.job-stat-task {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
 .job-log-wrap { position: relative; margin-top: 8px; }
 
 pre.job-log {

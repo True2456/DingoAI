@@ -27,6 +27,8 @@ Opens **http://127.0.0.1:8765** (local machine only).
 Features in the UI:
 
 - **Presets** — save/load model settings and generation prompts (`config/dingo_presets.json`), including Antigravity, red team, and network-optimization curricula
+- **Training track** — Dingo (`write_file` / `python`) or oMLX / Claude Code (`call:Read{…}` markup); see [docs/TRACK2_OMLX.md](docs/TRACK2_OMLX.md)
+- **Build oMLX pack** — convert curated Dingo JSONL to `data/curated/all_omlx_tool_training.jsonl` without touching the default pack
 - **Path browser** — pick folders via Browse; edit **file names** only for JSONL outputs
 - **Train ratio hint** — warns when iterations ÷ samples exceeds safe limits
 - **Job logs** — download or clear logs; scroll pinning so logs do not jump while you read

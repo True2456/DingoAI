@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from curate_import_samples import (  # noqa: E402
     CURATED_DIR,
+    action_types,
     classify,
     prefixed,
     score,
@@ -113,14 +114,157 @@ def curate(data_dir: Path, out_dir: Path, prefix: str = DEFAULT_PREFIX) -> Dict[
     return manifest
 
 
+def oversized_skip_instructions(out_dir: Path) -> set[str]:
+    """Instructions excluded from all_tool_training (token overflow during train)."""
+    skip_path = out_dir / "oversized_training_skipped.jsonl"
+    if not skip_path.exists():
+        return set()
+    instructions: set[str] = set()
+    for line in skip_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        instruction = row.get("instruction", "")
+        if instruction:
+            instructions.add(instruction)
+    return instructions
+
+
 def merge_tool_training(out_dir: Path, prefix: str = DEFAULT_PREFIX) -> Dict[str, Any]:
     """Dedupe tool workflows across generated + data (+ import) packs."""
+    oversized_skip = oversized_skip_instructions(out_dir)
     packs = [
         ("generated", out_dir / "generated_recommended_tool_training.jsonl"),
         ("data", out_dir / prefixed(prefix, "good_tool_workflow.jsonl")),
         ("import", out_dir / "import_good_tool_workflow.jsonl"),
+        ("generated_patch", out_dir / "generated_good_tool_patch_single_python.jsonl"),
     ]
-    priority = {"generated": 0, "data": 1, "import": 2}
+    for kept_name in (
+        "dingo_run_tooling_kept.jsonl",
+        "dingo_run_toolingv2_kept.jsonl",
+        "dingo_run_toolingv3_kept.jsonl",
+        "toolingv4_kept.jsonl",
+        "Reading_kept.jsonl",
+        "dingo_run2_kept.jsonl",
+        "reading2_kept.jsonl",
+        "Networking_Run_kept.jsonl",
+        "dingo_run_networking_kept.jsonl",
+        "dingo_run_newmodel_kept.jsonl",
+        "dingo_run_Jsonfocus_kept.jsonl",
+        "dingo_run_jsonfocus2_kept.jsonl",
+        "new_model_test_v1_kept.jsonl",
+        "dingo_run3_kept.jsonl",
+        "macbook_archive_kept.jsonl",
+        "NewModelRun3_kept.jsonl",
+        "NewModelRun4_kept.jsonl",
+        "NewModelRun5_kept.jsonl",
+        "NewModelRun6_kept.jsonl",
+        "NewModelRun7-ReadFocus_kept.jsonl",
+        "NewModelRun8-ReadFocus_kept.jsonl",
+        "dingo_run4_laptop_kept.jsonl",
+        "V3_Jsonpatch_kept.jsonl",
+    ):
+        tooling_kept = out_dir / kept_name
+        if tooling_kept.exists():
+            packs.append((kept_name.replace(".jsonl", ""), tooling_kept))
+
+    # Partial-run skips: only true rejects from sort_partial_run (see sort report).
+    # Do not block an instruction if a *_kept pack has a good trajectory for it.
+    kept_good_instructions: set[str] = set()
+    for kept_name in (
+        "dingo_run_tooling_kept.jsonl",
+        "dingo_run_toolingv2_kept.jsonl",
+        "dingo_run_toolingv3_kept.jsonl",
+        "toolingv4_kept.jsonl",
+        "Reading_kept.jsonl",
+        "dingo_run2_kept.jsonl",
+        "reading2_kept.jsonl",
+        "Networking_Run_kept.jsonl",
+        "dingo_run_networking_kept.jsonl",
+        "dingo_run_newmodel_kept.jsonl",
+        "dingo_run_Jsonfocus_kept.jsonl",
+        "dingo_run_jsonfocus2_kept.jsonl",
+        "new_model_test_v1_kept.jsonl",
+        "dingo_run3_kept.jsonl",
+        "macbook_archive_kept.jsonl",
+        "NewModelRun3_kept.jsonl",
+        "NewModelRun4_kept.jsonl",
+        "NewModelRun5_kept.jsonl",
+        "NewModelRun6_kept.jsonl",
+        "NewModelRun7-ReadFocus_kept.jsonl",
+        "NewModelRun8-ReadFocus_kept.jsonl",
+        "dingo_run4_laptop_kept.jsonl",
+        "V3_Jsonpatch_kept.jsonl",
+    ):
+        kept_path = out_dir / kept_name
+        if not kept_path.exists():
+            continue
+        for line in kept_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not classify(row).startswith("reject_"):
+                kept_good_instructions.add(row.get("instruction", ""))
+
+    tooling_skip_instructions: set[str] = set()
+    for skip_name in (
+        "dingo_run_tooling_skipped.jsonl",
+        "dingo_run_toolingv2_skipped.jsonl",
+        "dingo_run_toolingv3_skipped.jsonl",
+        "toolingv4_skipped.jsonl",
+        "Reading_skipped.jsonl",
+        "dingo_run2_skipped.jsonl",
+        "reading2_skipped.jsonl",
+        "Networking_Run_skipped.jsonl",
+        "dingo_run_networking_skipped.jsonl",
+        "dingo_run_newmodel_skipped.jsonl",
+        "dingo_run_Jsonfocus_skipped.jsonl",
+        "dingo_run_jsonfocus2_skipped.jsonl",
+        "new_model_test_v1_skipped.jsonl",
+        "dingo_run3_skipped.jsonl",
+    ):
+        tooling_skipped = out_dir / skip_name
+        if tooling_skipped.exists():
+            for line in tooling_skipped.read_text().splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                instruction = row.get("instruction", "")
+                if (
+                    classify(row).startswith("reject_")
+                    and instruction
+                    and instruction not in kept_good_instructions
+                ):
+                    tooling_skip_instructions.add(instruction)
+    priority = {
+        "generated": 0,
+        "dingo_run_tooling_kept": -1,
+        "dingo_run_toolingv2_kept": -1,
+        "dingo_run_toolingv3_kept": -1,
+        "toolingv4_kept": -1,
+        "Reading_kept": -1,
+        "dingo_run2_kept": -1,
+        "reading2_kept": -2,
+        "Networking_Run_kept": -1,
+        "dingo_run_networking_kept": -1,
+        "dingo_run_newmodel_kept": -1,
+        "dingo_run_Jsonfocus_kept": -1,
+        "dingo_run_jsonfocus2_kept": -1,
+        "new_model_test_v1_kept": -1,
+        "dingo_run3_kept": -1,
+        "macbook_archive_kept": -1,
+        "NewModelRun3_kept": -1,
+        "NewModelRun4_kept": -1,
+        "NewModelRun5_kept": -1,
+        "NewModelRun6_kept": -1,
+        "NewModelRun7-ReadFocus_kept": -1,
+        "NewModelRun8-ReadFocus_kept": -1,
+        "dingo_run4_laptop_kept": -1,
+        "V3_Jsonpatch_kept": -1,
+        "data": 1,
+        "import": 2,
+        "generated_patch": 3,
+    }
     by_instruction: Dict[str, Dict[str, Any]] = {}
 
     for pack_name, path in packs:
@@ -131,7 +275,18 @@ def merge_tool_training(out_dir: Path, prefix: str = DEFAULT_PREFIX) -> Dict[str
                 continue
             row = json.loads(line)
             instruction = row.get("instruction", "")
-            rank = (priority.get(pack_name, 9), 1 if row.get("recovered_from_failed") else 0, -score(row))
+            if instruction in tooling_skip_instructions or instruction in oversized_skip:
+                continue
+            types = action_types(row)
+            has_read = "read_file" in types
+            multi_py = sum(1 for t in types if t == "python") >= 2
+            rank = (
+                priority.get(pack_name, 9),
+                1 if row.get("recovered_from_failed") else 0,
+                0 if has_read else 1,
+                0 if multi_py else 1,
+                -score(row),
+            )
             existing = by_instruction.get(instruction)
             if existing is None or rank < existing["_rank"]:
                 row = dict(row)

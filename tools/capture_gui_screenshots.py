@@ -56,7 +56,7 @@ def main() -> None:
         wait_for_server()
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(viewport={"width": 1280, "height": 1400})
+            page = browser.new_page(viewport={"width": 1280, "height": 2000})
             page.goto(f"{BASE}/", wait_until="load", timeout=30000)
 
             # Wait until React-like init finishes (config + presets loaded)

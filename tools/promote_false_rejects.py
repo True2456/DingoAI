@@ -6,8 +6,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from curate_import_samples import is_json_abort  # noqa: E402
 
 
 def task_id(instruction: str) -> str:
@@ -16,10 +20,6 @@ def task_id(instruction: str) -> str:
 
 def action_types(traj: Dict[str, Any]) -> List[str]:
     return [(t.get("action") or {}).get("type") for t in traj.get("turns") or []]
-
-
-def is_json_abort(traj: Dict[str, Any]) -> bool:
-    return "failed to generate valid json" in json.dumps(traj).lower()
 
 
 def last_python_observation(traj: Dict[str, Any]) -> Optional[Dict[str, Any]]:

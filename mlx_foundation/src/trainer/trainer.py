@@ -23,7 +23,8 @@ class MLXTrainer:
         iters: int = 100,
         batch_size: int = 1,
         adapter_path: Optional[str] = None,
-        max_seq_length: int = 2048  # Reduced to 2048 (max sequence length in dataset is 2003) to prevent Metal OOM.
+        max_seq_length: int = 8192,  # Long tool trajectories need full observation context; lower if Metal OOM.
+        wire_format: str = "dingo",
     ):
         self.model_path = model_path
         self.output_dir = output_dir
@@ -33,6 +34,9 @@ class MLXTrainer:
         self.batch_size = batch_size
         self.adapter_path = adapter_path
         self.max_seq_length = max_seq_length
+        if wire_format not in ("dingo", "omlx_claude"):
+            raise ValueError(f"wire_format must be 'dingo' or 'omlx_claude', got {wire_format!r}")
+        self.wire_format = wire_format
 
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -66,7 +70,20 @@ class MLXTrainer:
                     else:
                         prompt_1 = f"Task: {sample.get('instruction', '')}\n"
 
-                    completion_1 = f"<|channel>thought\n{sample['thought']}\n<channel|>{sample['actions']}"
+                    actions = sample.get("actions", "")
+                    if self.wire_format == "omlx_claude":
+                        if sample.get("wire_format") != "omlx_claude" or "call:" not in actions:
+                            from agent_wire_formats import sample_to_omlx_training_fields
+
+                            fields = sample_to_omlx_training_fields(sample)
+                            thought_text = fields["thought"]
+                            actions = fields["actions"]
+                        else:
+                            thought_text = sample["thought"]
+                    else:
+                        thought_text = sample["thought"]
+
+                    completion_1 = f"<|channel>thought\n{thought_text}\n<channel|>{actions}"
 
                     # Token length safety check
                     p1_len = len(tokenizer.encode(prompt_1))
@@ -78,7 +95,7 @@ class MLXTrainer:
                     f.write(json.dumps({"prompt": prompt_1, "completion": completion_1}) + "\n")
 
                     # Sub-step 2: Learn to answer based on real observation (Multi-turn chat flow)
-                    p2_content = f"<|channel>thought\n{sample['thought']}\n<channel|>{sample['actions']}"
+                    p2_content = f"<|channel>thought\n{thought_text}\n<channel|>{actions}"
                     messages_2 = [
                         {"role": "user", "content": p1_text},
                         {"role": "assistant", "content": p2_content},
@@ -94,8 +111,8 @@ class MLXTrainer:
                         except Exception:
                             prompt_2 = (
                                 f"Task: {sample.get('instruction', '')}\n"
-                                f"Thought: {sample['thought']}\n"
-                                f"Action: {sample['actions']}\n"
+                                f"Thought: {thought_text}\n"
+                                f"Action: {actions}\n"
                                 f"Observation: {sample['observation']}\n"
                             )
                     else:

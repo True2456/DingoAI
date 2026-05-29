@@ -23,7 +23,14 @@ from curate_import_samples import (  # noqa: E402
 )
 
 GENERATED_DIR = Path(__file__).resolve().parents[1] / "data" / "generated"
+CURATED_DIR = Path(__file__).resolve().parents[1] / "data" / "curated"
 DEFAULT_PREFIX = "generated"
+
+
+def oversized_skip_instructions() -> set[str]:
+    from curate_data_trajectories import oversized_skip_instructions as load_skip
+
+    return load_skip(CURATED_DIR)
 
 
 def parse_legacy_actions(actions_str: str) -> List[Tuple[str, str]]:
@@ -175,12 +182,15 @@ def curate(
     rows = load_success_rows(input_dir)
     if include_failed_recovery:
         rows.extend(load_recoverable_failed(input_dir))
+    skip_instructions = oversized_skip_instructions()
 
     buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     rejects: Counter[str] = Counter()
     by_source: Counter[str] = Counter()
 
     for sample in rows:
+        if sample.get("instruction", "") in skip_instructions:
+            continue
         by_source[sample.get("_source_file", "?")] += 1
         label = classify(sample)
         if label.startswith("reject_"):

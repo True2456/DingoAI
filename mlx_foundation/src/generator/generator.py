@@ -1,9 +1,176 @@
+import json
 import random
 import hashlib
 import os
+import re
+import time
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import mlx_lm
+
+AGENT_STEP_MAX_TOKENS = 4096
+AGENT_STEP_RETRY_MAX_TOKENS = 1536
+AGENT_JSON_PARSE_RETRIES = 2
+VALID_AGENT_ACTION_TYPES = frozenset(
+    {"python", "write_file", "read_file", "list_dir", "none"}
+)
+
+
+def emit_gen_stats(label: str, tokenizer, prompt: str, response: str, elapsed: float) -> None:
+    """Print one parseable stats line for the web UI (negligible vs model forward pass)."""
+    completion = response[len(prompt) :] if response.startswith(prompt) else response
+    try:
+        token_count = len(tokenizer.encode(completion))
+    except Exception:
+        token_count = max(1, len(completion) // 4)
+    tok_s = token_count / elapsed if elapsed > 0 else 0.0
+    print(
+        f"[gen-stats] label={label} tokens={token_count} elapsed_s={elapsed:.2f} tok_s={tok_s:.1f}",
+        flush=True,
+    )
+
+
+def timed_generate(model, tokenizer, *, prompt: str, label: str, **kwargs) -> str:
+    started = time.perf_counter()
+    response = mlx_lm.generate(model, tokenizer, prompt=prompt, verbose=False, **kwargs)
+    emit_gen_stats(label, tokenizer, prompt, response, time.perf_counter() - started)
+    return response
+
+
+def _extract_balanced_json(text: str, open_ch: str, close_ch: str) -> Optional[Any]:
+    depth = 0
+    in_string = False
+    escape = False
+    start_idx = -1
+
+    for i, char in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            if in_string:
+                escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == open_ch:
+            if depth == 0:
+                start_idx = i
+            depth += 1
+        elif char == close_ch:
+            depth -= 1
+            if depth == 0 and start_idx != -1:
+                candidate = text[start_idx : i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def normalize_agent_response(text: str) -> str:
+    """Strip channel tags and markdown fences so JSON extraction can run."""
+    text = (text or "").strip()
+    if not text:
+        return text
+
+    if "<channel|>" in text:
+        text = text.split("<channel|>")[-1].strip()
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if fenced:
+        inner = fenced.group(1).strip()
+        if inner.startswith("{"):
+            return inner
+
+    if text.lower().startswith("```json"):
+        text = text[7:].lstrip()
+    elif text.startswith("```"):
+        text = text[3:].lstrip()
+    if text.endswith("```"):
+        text = text[:-3].rstrip()
+    return text.strip()
+
+
+def _agent_step_candidates(raw: str) -> List[str]:
+    candidates: List[str] = []
+    seen: set[str] = set()
+
+    def add(text: str) -> None:
+        text = (text or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    add(raw)
+    add(normalize_agent_response(raw))
+    for part in raw.split("<channel|>"):
+        add(part)
+        add(normalize_agent_response(part))
+    for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE):
+        add(match.group(1))
+    if "```json" in raw.lower():
+        idx = raw.lower().find("```json")
+        add(raw[idx + 7 :].strip())
+    return candidates
+
+
+def is_valid_agent_step(step: Dict[str, Any]) -> bool:
+    action_type = step.get("action_type")
+    if action_type not in VALID_AGENT_ACTION_TYPES:
+        return False
+    if action_type == "write_file":
+        action_input = step.get("action_input")
+        return (
+            isinstance(action_input, dict)
+            and bool(action_input.get("path"))
+            and "content" in action_input
+        )
+    return True
+
+
+def parse_agent_step(raw: str) -> Optional[Dict[str, Any]]:
+    """Parse one agent turn from JSON and common pilot/channel wrappers."""
+    for candidate in _agent_step_candidates(raw):
+        obj = _extract_balanced_json(candidate, "{", "}")
+        if isinstance(obj, dict) and is_valid_agent_step(obj):
+            return obj
+
+    # Long channel ramble often puts valid JSON last; scan every '{' from the end.
+    text = raw or ""
+    for idx in range(len(text) - 1, -1, -1):
+        if text[idx] != "{":
+            continue
+        obj = _extract_balanced_json(text[idx:], "{", "}")
+        if isinstance(obj, dict) and is_valid_agent_step(obj):
+            return obj
+    return None
+
+
+JSON_RETRY_HINTS = (
+    "",
+    (
+        "\n\nRETRY: Your last reply was invalid or truncated. "
+        "Reply with ONE raw JSON object only. Start with '{'. "
+        "'thought' must be ONE short sentence (under 25 words). "
+        "No <|channel> tags, no markdown fences, no planning essay."
+    ),
+    (
+        "\n\nFINAL RETRY: Token budget is tight. "
+        "Output ONLY the JSON object — first character must be '{', last must be '}'. "
+        "thought: under 15 words. If action_type is not write_file, keep action_input tiny."
+    ),
+)
+
+
+def extract_first_json_array(text: str) -> Optional[list]:
+    obj = _extract_balanced_json(text, "[", "]")
+    return obj if isinstance(obj, list) else None
+
 
 class BaseGenerator(ABC):
     """Base class for all synthetic data generators."""
@@ -52,12 +219,12 @@ class MLXGenerator(BaseGenerator):
         samples = []
         for i in range(num_samples):
             prompt = prompts[i % len(prompts)]
-            response = mlx_lm.generate(
+            response = timed_generate(
                 self.model,
                 self.tokenizer,
                 prompt=prompt,
+                label="sample",
                 max_tokens=max_tokens,
-                verbose=False
             )
 
             clean_response = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
@@ -96,12 +263,12 @@ class MultiTeacherMLXGenerator(BaseGenerator):
                 try:
                     import mlx_lm
                     model, tokenizer = mlx_lm.load(path)
-                    response = mlx_lm.generate(
+                    response = timed_generate(
                         model,
                         tokenizer,
                         prompt=p,
+                        label="teacher_sample",
                         max_tokens=512,
-                        verbose=False
                     )
                     clean_response = response[len(p):].strip() if response.startswith(p) else response.strip()
                     
@@ -182,40 +349,6 @@ class DynamicTaskGenerator:
             if self.system_prompt:
                 system_msg = self.system_prompt
             
-            def extract_first_json_array(text: str) -> Optional[list]:
-                brace_depth = 0
-                in_string = False
-                escape = False
-                start_idx = -1
-                
-                for i, char in enumerate(text):
-                    if escape:
-                        escape = False
-                        continue
-                    if char == '\\':
-                        if in_string:
-                            escape = True
-                        continue
-                    if char == '"':
-                        in_string = not in_string
-                        continue
-                    if not in_string:
-                        if char == '[':
-                            if brace_depth == 0:
-                                start_idx = i
-                            brace_depth += 1
-                        elif char == ']':
-                            brace_depth -= 1
-                            if brace_depth == 0 and start_idx != -1:
-                                candidate = text[start_idx:i+1]
-                                try:
-                                    res = json.loads(candidate)
-                                    if isinstance(res, list):
-                                        return res
-                                except json.JSONDecodeError:
-                                    pass
-                return None
-
             batch_size = 50
             consecutive_failures = 0
             while len(tasks) < num_tasks and consecutive_failures < 5:
@@ -239,9 +372,12 @@ class DynamicTaskGenerator:
                 else:
                     prompt = f"{system_msg}\n\n{user_msg}"
                 
-                response = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=4096, verbose=False)
+                response = timed_generate(
+                    model, tokenizer, prompt=prompt, label="bootstrap_tasks", max_tokens=4096
+                )
                 clean_resp = response[len(prompt):].strip() if response.startswith(prompt) else response.strip()
-                
+                clean_resp = normalize_agent_response(clean_resp) or clean_resp
+
                 batch_tasks = extract_first_json_array(clean_resp)
                 if batch_tasks and isinstance(batch_tasks, list):
                     added_any = False
@@ -339,6 +475,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         task_system_prompt: Optional[str] = None,
         teacher_attempt_order: Optional[List[int]] = None,
         memory_settings: Optional[Dict[str, Any]] = None,
+        wire_format: str = "dingo",
     ):
         self.model_paths = model_paths
         self.workspace_dir = workspace_dir
@@ -346,6 +483,7 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
         self.task_system_prompt = task_system_prompt
         self.teacher_attempt_order = teacher_attempt_order or list(range(len(model_paths)))
         self.memory_settings = memory_settings or {}
+        self.wire_format = wire_format if wire_format in ("dingo", "omlx_claude") else "dingo"
         self.teacher_cache_limit_gb = float(self.memory_settings.get("teacher_cache_limit_gb", 45))
         self.bootstrap_max_model_gb = float(self.memory_settings.get("bootstrap_max_model_gb", self.teacher_cache_limit_gb))
         self.cache_teachers = bool(self.memory_settings.get("cache_teachers", self.teacher_cache_limit_gb > 0))
@@ -519,46 +657,34 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                                 "rerun the tests",
                                 "rerun tests",
                                 "demonstrates the",
+                                "must fail",
+                                "must pass",
+                                "run python again",
+                                "optimize",
+                                "compact json",
+                                "separators",
                             )
                         )
 
-                    def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
-                        import json
-                        brace_depth = 0
-                        in_string = False
-                        escape = False
-                        start_idx = -1
-                        
-                        for i, char in enumerate(text):
-                            if escape:
-                                escape = False
-                                continue
-                            if char == '\\':
-                                if in_string:
-                                    escape = True
-                                continue
-                            if char == '"':
-                                in_string = not in_string
-                                continue
-                            if not in_string:
-                                if char == '{':
-                                    if brace_depth == 0:
-                                        start_idx = i
-                                    brace_depth += 1
-                                elif char == '}':
-                                    brace_depth -= 1
-                                    if brace_depth == 0 and start_idx != -1:
-                                        candidate = text[start_idx:i+1]
-                                        try:
-                                            return json.loads(candidate)
-                                        except json.JSONDecodeError:
-                                            pass
-                        return None
+                    def _last_python_verified(turns: List[Dict[str, Any]]) -> bool:
+                        last_py = None
+                        for turn in turns:
+                            if (turn.get("action") or {}).get("type") == "python":
+                                last_py = turn
+                        if not last_py:
+                            return False
+                        obs = last_py.get("observation") or {}
+                        if obs.get("expected_test_failure"):
+                            return False
+                        return bool(
+                            obs.get("verification_passed")
+                            or obs.get("tests_passed_signal")
+                        )
 
                     turn = 0
                     premature_none_retries = 0
                     max_premature_none_retries = 2
-                    json_parse_retries = 2
+                    json_parse_retries = AGENT_JSON_PARSE_RETRIES
 
                     while turn < max_turns:
                         system_msg = (
@@ -574,6 +700,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "    'none'       — task is complete, provide final_answer\n"
                             "- 'action_input': For write_file use an object with path and content. For python/read_file use a string. For list_dir use an empty string.\n"
                             "- 'final_answer': A descriptive string summarizing the result ONLY if action_type is 'none'.\n\n"
+                            "BREVITY (critical): Put reasoning ONLY inside the JSON 'thought' string (max 2 short sentences). "
+                            "Do NOT write long native channel monologues or step-by-step planning outside the JSON. "
+                            "Reserve the token budget for a complete, valid JSON object.\n\n"
+                            "OUTPUT RULES: Reply with ONE raw JSON object only — no <|channel> tags, no markdown ``` fences, no prose before or after the JSON. "
+                            "The first non-whitespace character of your reply MUST be '{'.\n"
                             "CRITICAL: When the task asks you to create or edit files, DO NOT merely describe code or print Markdown code blocks. "
                             "Use write_file/read_file/list_dir/python actions to mutate and verify the workspace. "
                             "For write_file, ALWAYS set action_input to an object like {\"path\": \"src/app.py\", \"content\": \"...\"}; do not put raw file content directly in action_input. "
@@ -618,6 +749,11 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                                 "CRITICAL: Even though you are writing buggy code, you MUST still output your response in the EXACT JSON dictionary format described below. Do not use plain text.\n"
                             )
                         
+                        if self.wire_format == "omlx_claude":
+                            from agent_wire_formats import OMLX_AGENT_SYSTEM_APPENDIX
+
+                            system_msg += OMLX_AGENT_SYSTEM_APPENDIX
+
                         system_msg += (
                             "\nFormat Examples:\n"
                             "Example 1 (inline execution):\n"
@@ -649,39 +785,63 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             "  \"final_answer\": \"\"\n"
                             "}"
                         )
-                        user_msg = f"Task: {t}\n\nHistory of interactions:\n{history}\n\nGenerate the next JSON step now:"
-
-                        # Use tokenizer's chat template if supported
-                        if hasattr(tokenizer, "apply_chat_template"):
-                            messages = [
-                                {"role": "system", "content": system_msg},
-                                {"role": "user", "content": user_msg}
-                            ]
-                            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                        else:
-                            prompt = f"{system_msg}\n\n{user_msg}"
+                        user_msg_base = (
+                            f"Task: {t}\n\nHistory of interactions:\n{history}\n\n"
+                            "Generate the next JSON step now:"
+                        )
 
                         step = None
                         clean_resp = ""
                         for json_attempt in range(json_parse_retries + 1):
-                            response = mlx_lm.generate(
+                            retry_hint = JSON_RETRY_HINTS[
+                                min(json_attempt, len(JSON_RETRY_HINTS) - 1)
+                            ]
+                            user_msg = user_msg_base + retry_hint
+                            step_max_tokens = (
+                                AGENT_STEP_MAX_TOKENS
+                                if json_attempt == 0
+                                else AGENT_STEP_RETRY_MAX_TOKENS
+                            )
+
+                            if hasattr(tokenizer, "apply_chat_template"):
+                                messages = [
+                                    {"role": "system", "content": system_msg},
+                                    {"role": "user", "content": user_msg},
+                                ]
+                                prompt = tokenizer.apply_chat_template(
+                                    messages,
+                                    tokenize=False,
+                                    add_generation_prompt=True,
+                                    enable_thinking=False,
+                                )
+                            else:
+                                prompt = f"{system_msg}\n\n{user_msg}"
+
+                            response = timed_generate(
                                 model,
                                 tokenizer,
                                 prompt=prompt,
-                                max_tokens=2048,
-                                verbose=False,
+                                label="agent_step",
+                                max_tokens=step_max_tokens,
                             )
                             clean_resp = (
                                 response[len(prompt):].strip()
                                 if response.startswith(prompt)
                                 else response.strip()
                             )
-                            step = extract_first_json(clean_resp)
+                            if self.wire_format == "omlx_claude":
+                                from agent_wire_formats import parse_omlx_agent_step
+
+                                step = parse_omlx_agent_step(clean_resp)
+                            else:
+                                step = parse_agent_step(clean_resp)
                             if step is not None:
                                 break
+                            near_limit = len(tokenizer.encode(clean_resp)) >= step_max_tokens - 32
                             print(
-                                f"JSON parse failed (attempt {json_attempt + 1}/"
-                                f"{json_parse_retries + 1})."
+                                f"{'Tool' if self.wire_format == 'omlx_claude' else 'JSON'} parse failed (attempt {json_attempt + 1}/"
+                                f"{json_parse_retries + 1}, max_tokens={step_max_tokens}"
+                                f"{', likely truncated' if near_limit else ''})."
                             )
 
                         if step is None:
@@ -701,9 +861,6 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                         action_type = step.get("action_type", "none")
                         action_input = step.get("action_input", "")
 
-                        thought_trace.append(thought)
-                        actions_trace.append(f"{action_type}: {action_input}")
-
                         turn_data = {
                             "turn": turn + 1,
                             "thought": thought,
@@ -720,7 +877,8 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
 
                         if action_type == "none":
                             wrote_files = any(
-                                (existing.get("action") or {}).get("type") == "write_file"
+                                (existing.get("action") or {}).get("type")
+                                in ("write_file", "Write", "Edit")
                                 for existing in turns_array
                             )
                             if (
@@ -736,13 +894,37 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                                 )
                                 continue
 
+                            thought_trace.append(thought)
+                            actions_trace.append(f"{action_type}: {action_input}")
                             final_answer = step.get("final_answer", "Task complete.")
                             observations_trace.append("Environment complete.")
                             turn_data["observation"]["stdout"] = "Environment complete."
                             turns_array.append(turn_data)
                             break
 
-                        if action_type != "list_dir" and not action_input:
+                        thought_trace.append(thought)
+                        if self.wire_format == "omlx_claude":
+                            from agent_wire_formats import (
+                                format_omlx_tool_call,
+                                sandbox_action_type,
+                            )
+
+                            if action_type == "none":
+                                actions_trace.append("none:")
+                            else:
+                                args = (
+                                    action_input
+                                    if isinstance(action_input, dict)
+                                    else {"input": action_input}
+                                )
+                                actions_trace.append(
+                                    format_omlx_tool_call(action_type, args)
+                                )
+                            action_type = sandbox_action_type(action_type)
+                        else:
+                            actions_trace.append(f"{action_type}: {action_input}")
+
+                        if action_type not in ("list_dir", "Glob") and not action_input:
                             sandbox_success = False
                             obs = f"Error: action_type '{action_type}' requires non-empty action_input."
                             observations_trace.append(obs)
@@ -816,20 +998,26 @@ class EnsembleAgenticTrajectoryGenerator(BaseGenerator):
                             for turn in turns_array
                         ]
                         file_workflow_requested = _file_workflow_task()
-                        if file_workflow_requested and ("write_file" not in action_types or "python" not in action_types):
+                        wrote = {"write_file", "Write"} & set(action_types)
+                        ran = {"python", "Bash"} & set(action_types)
+                        if file_workflow_requested and (not wrote or not ran):
                             sandbox_success = False
                             observations_trace.append(
                                 "Rejected: file workflow did not include both write_file and python verification."
                             )
 
                         if _is_patch_style_task():
-                            verified = any(
+                            if _last_python_verified(turns_array) and wrote:
+                                sandbox_success = True
+                            elif any(
                                 (existing.get("observation") or {}).get("verification_passed")
                                 for existing in turns_array
                                 if (existing.get("action") or {}).get("type") == "python"
-                            )
-                            if verified and "write_file" in action_types:
-                                sandbox_success = True
+                            ):
+                                observations_trace.append(
+                                    "Rejected: patch/optimize task requires final python verification to pass."
+                                )
+                                sandbox_success = False
 
                         return {
                             "instruction": t,

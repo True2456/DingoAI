@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from curate_data_trajectories import curate as curate_data, merge_tool_training
@@ -31,7 +32,7 @@ All curated JSONL lives in this folder. Prefixes: `import_`, `generated_`, `data
 
 | File | Count | Notes |
 |------|------:|-------|
-| **`all_tool_training.jsonl`** | **{merged.get('count', 0)}** | **Merged** generated + data + import tool workflows (deduped) |
+| **`all_tool_training.jsonl`** | **{merged.get('count', 0)}** | **Merged** generated + data + import tool workflows + patch-tier (deduped) |
 | `generated_recommended_tool_training.jsonl` | {gen.get('recommended_tool_training', 0)} | MLX `data/generated/` only |
 | `data_good_tool_workflow.jsonl` | {dat.get('good_tool_workflow.jsonl', dat.get('good_tool_workflow', 0))} | `iteration_*` + `generated_trajectories_*` |
 | `import_good_tool_workflow.jsonl` | {imp.get('good_tool_workflow', 0)} | Import Sample Sets |

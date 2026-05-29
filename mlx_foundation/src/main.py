@@ -105,6 +105,7 @@ def run_generate_only(
     teacher_attempt_order: Optional[List[int]] = None,
     overwrite: bool = False,
     memory_settings: Optional[dict] = None,
+    wire_format: str = "dingo",
 ):
     """
     Standalone generation mode — runs on the second machine (e.g. M3 Max 64GB).
@@ -136,6 +137,7 @@ def run_generate_only(
         task_system_prompt=task_system_prompt,
         teacher_attempt_order=teacher_attempt_order,
         memory_settings=memory_settings,
+        wire_format=wire_format,
     )
     # checkpoint_path enables incremental writing + crash recovery
     samples = generator.generate(num_samples=num_samples, checkpoint_path=output_path)
@@ -159,6 +161,8 @@ def run_train_only(
     training_iters: int,
     resume_adapter_path: Optional[str],
     overwrite: bool = False,
+    max_seq_length: int = 8192,
+    wire_format: str = "dingo",
 ):
     """
     Standalone training mode — reads a pre-generated JSONL file and runs LoRA
@@ -188,13 +192,17 @@ def run_train_only(
     ensure_can_write_output(output_dir, overwrite, "adapter directory")
     os.makedirs(output_dir, exist_ok=True)
 
+    print(f"Max sequence length: {max_seq_length}")
     trainer = MLXTrainer(
         model_path=base_model_path,
         output_dir=output_dir,
         iters=training_iters,
         batch_size=1,
-        adapter_path=resume_adapter_path
+        adapter_path=resume_adapter_path,
+        max_seq_length=max_seq_length,
+        wire_format=wire_format,
     )
+    print(f"Training wire_format: {wire_format}")
     trainer.train(samples)
 
     print("\nEvaluating trained model...")
@@ -250,6 +258,7 @@ class MLXSelfTrainingOrchestrator:
         task_system_prompt: Optional[str] = None,
         teacher_attempt_order: Optional[List[int]] = None,
         memory_settings: Optional[dict] = None,
+        max_seq_length: int = 8192,
     ):
         self.base_model_path = base_model_path
         self.iterations = iterations
@@ -257,6 +266,7 @@ class MLXSelfTrainingOrchestrator:
         self.output_dir = output_dir
         self.generator_type = generator_type
         self.training_iters = training_iters
+        self.max_seq_length = max_seq_length
         self.resume_adapter_path = resume_adapter_path
         self.bootstrap_model_path = bootstrap_model_path
         self.task_system_prompt = task_system_prompt
@@ -341,7 +351,8 @@ class MLXSelfTrainingOrchestrator:
                 output_dir=iteration_output_dir,
                 iters=self.training_iters,
                 batch_size=1,
-                adapter_path=current_adapter_path
+                adapter_path=current_adapter_path,
+                max_seq_length=self.max_seq_length,
             )
             trainer.train(synthetic_samples)
 
@@ -530,6 +541,18 @@ if __name__ == "__main__":
         default="models/mlx_self_training/train_only",
         help="[train-only] Directory to save the trained adapter (default: models/mlx_self_training/train_only)."
     )
+    parser.add_argument(
+        "--max-seq-length",
+        type=int,
+        default=8192,
+        help="Max tokens per training sequence (default: 8192). Lower to 4096 or 2048 if Metal OOM.",
+    )
+    parser.add_argument(
+        "--wire-format",
+        choices=["dingo", "omlx_claude"],
+        default=None,
+        help="Training/generation wire format: dingo (write_file:|python:) or omlx_claude (call:Read{...}).",
+    )
     args = parser.parse_args()
 
     run_config = load_run_config(args.config)
@@ -548,6 +571,7 @@ if __name__ == "__main__":
             sys.exit(1)
     teacher_attempt_order = normalize_teacher_order(teacher_attempt_order, len(teacher_paths))
 
+    wire_format = args.wire_format or run_config.get("generation", {}).get("wire_format") or "dingo"
     task_system_prompt = run_config.get("generation", {}).get("task_system_prompt") or None
     if args.task_prompt_file:
         with open(args.task_prompt_file, "r") as f:
@@ -580,6 +604,7 @@ if __name__ == "__main__":
             teacher_attempt_order=teacher_attempt_order,
             overwrite=args.overwrite,
             memory_settings=memory_settings,
+            wire_format=wire_format,
         )
 
     elif args.mode == "train-only":
@@ -593,6 +618,8 @@ if __name__ == "__main__":
             training_iters=args.train_iters,
             resume_adapter_path=args.resume,
             overwrite=args.overwrite,
+            max_seq_length=args.max_seq_length,
+            wire_format=wire_format,
         )
 
     elif args.mode == "smoke":
@@ -609,6 +636,7 @@ if __name__ == "__main__":
             task_system_prompt=task_system_prompt,
             teacher_attempt_order=teacher_attempt_order,
             memory_settings=memory_settings,
+            max_seq_length=args.max_seq_length,
         )
         orchestrator.run(teacher_paths=teacher_paths)
 
@@ -629,6 +657,7 @@ if __name__ == "__main__":
                 task_system_prompt=task_system_prompt,
                 teacher_attempt_order=teacher_attempt_order,
                 memory_settings=memory_settings,
+                max_seq_length=args.max_seq_length,
             )
             orchestrator.run(teacher_paths=teacher_paths)
         except KeyboardInterrupt:
